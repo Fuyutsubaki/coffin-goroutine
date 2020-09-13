@@ -1,6 +1,6 @@
 # coffin/goroutine
 
-coffin/goroutine is goroutine like concurrency support library.
+coffin/goroutine is a goroutine-like concurrency support library
 ```C++:sample.cpp
 template<class value_type>
 using MyChannel = cfn::BasicChannel<MyScheduler, value_type>;
