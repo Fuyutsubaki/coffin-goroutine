@@ -26,6 +26,4 @@ jobs:
       - name: Run a multi-line script
         run: |
           sudo apt-get update && sudo apt-get install clang-10 libc++abi-10-dev libc++-10-dev
-          clang++-10 test/test.cpp -I include/ -lpthread -std=c++2a -stdlib=libc++
-          ./a.out
-          echo "これで勝ったおもうなよ"
+          make -C test test

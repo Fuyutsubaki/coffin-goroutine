@@ -1,5 +1,6 @@
-//#include <gtest/gtest.h>
+#define IUTEST_USE_MAIN 1
 #include <coffin/goroutine.hpp>
+#include <iutest.hpp>
 #include <thread>
 #include<vector>
 
@@ -29,6 +30,52 @@ struct MyScheduler{
 
 template<class value_type>
 using MyChannel = cfn::BasicChannel<MyScheduler, value_type>;
+
+IUTEST(Goroutine, execute){
+    int n;
+    auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+        for(int i=0;i<3;++i){
+            n = i;
+            co_await std::experimental::suspend_always{};
+        }
+    }());
+    for(int i=0;i<3;++i){
+        g->execute();
+        IUTEST_ASSERT_EQ(i,n);
+    }
+}
+
+IUTEST(Goroutine, subtask_call){
+    int n;
+    auto gen_subtask = [&](int x) -> cfn::Task<> {
+        for (int i = 0; i < 3; ++i){
+            n = i + x;
+            co_await std::experimental::suspend_always{};
+        }
+    };
+    auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+        co_await gen_subtask(0);
+        co_await gen_subtask(3);
+    }());
+    // co_await subtask()でsuspendせず
+    // 6回で呼びきれる
+    for(int i=0;i<6;++i){
+        g->execute();
+        IUTEST_ASSERT_EQ(i,n);
+    }
+}
+
+IUTEST(Goroutine, subtask_return){
+    int n;
+    auto gen_subtask = []() -> cfn::Task<std::unique_ptr<int>> {
+        co_return std::make_unique<int>(42);
+    };
+    auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+        n = *(co_await gen_subtask());
+    }());
+    g->execute();
+    IUTEST_ASSERT_EQ(42, n);
+}
 
 cfn::Task<> send1(MyChannel<int>&ch){
     for(int i=0;i<3;++i){
@@ -69,8 +116,7 @@ cfn::Task<> recv_move(MyChannel<int>&ch){
 }
 
 
-//TEST(test_common, Ch)
-int main()
+IUTEST(test_common, Ch)
 {
     MyChannel<int> ch(MyScheduler{},0);
     MyChannel<int> done_ch(MyScheduler{},0);

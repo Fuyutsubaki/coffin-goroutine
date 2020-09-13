@@ -30,10 +30,11 @@ template <class value_type = void> struct Task {
   };
 
   template <class T> struct promise_type1 {
-    void return_value(value_type v) { val = v; }
+    template<class U>
+    void return_value(U && v) { val = std::forward<U>(v); }
     void unhandled_exception() { std::terminate(); }
     value_type val;
-    auto get() { return val; }
+    auto get() { return std::move(val); }
   };
   template <> struct promise_type1<void> {
     void return_void() {}
