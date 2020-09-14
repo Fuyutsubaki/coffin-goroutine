@@ -3,6 +3,7 @@
 #include <iutest.hpp>
 #include <thread>
 #include<vector>
+#include<array>
 
 IUTEST(Goroutine, execute){
     int n;
@@ -109,28 +110,82 @@ MyChannel<T> make_channel(std::size_t queue_size){
 
 
 IUTEST(BasicChannel, SendRecv){
-    std::vector<int> tmp;
-    auto ch = make_channel<int>(0);
-    gsc.spown_task(
-        [&]() -> cfn::Task<> {
-            for(int i=0;i<10;++i){
-                co_await ch.send(i);
-            }
-            ch.close();
-        }()
-    );
-    gsc.spown_task(
-        [&]() -> cfn::Task<> {
-            for(;;){
-                auto r = co_await ch.recv();
-                if(!r)break;
-                tmp.push_back(*r);
-            }
-            gsc.stop();
-        }()
-    );
-    gsc.run(1);
-    IUTEST_ASSERT_EQ((std::vector{0,1,2,3,4,5,6,7,8,9}), tmp);
+    for(int i=0;i<10;++i){
+        std::vector<int> tmp;
+        auto ch = make_channel<int>(4);
+        gsc.spown_task(
+            [&]() -> cfn::Task<> {
+                for(int i=0;i<10;++i){
+                    co_await ch.send(i);
+                }
+                ch.close();
+            }()
+        );
+        gsc.spown_task(
+            [&]() -> cfn::Task<> {
+                for(;;){
+                    auto r = co_await ch.recv();
+                    if(!r)break;
+                    tmp.push_back(*r);
+                }
+                gsc.stop();
+            }()
+        );
+        gsc.run(i);
+        IUTEST_ASSERT_EQ((std::vector{0,1,2,3,4,5,6,7,8,9}), tmp);
+    }
+}
+
+IUTEST(BasicChannel, SendRecvMultiInMultiOut){
+    std::array<std::vector<int>,3> tmp;
+    std::vector<int> tmp2;
+    auto ch = make_channel<int>(4);
+    std::atomic<int> cnt_in = 0;
+    std::atomic<int> cnt_out = 0;
+    for(int i=0;i<10;++i){
+        gsc.spown_task(
+            [&]() -> cfn::Task<> {
+                for(int i=0;i<10;++i){
+                    co_await ch.send(i);
+                }
+                if( (cnt_in+=1) == 10){
+                    ch.close();
+                }
+            }()
+
+        );
+    }
+
+    for(int i=0;i<3;++i){
+        gsc.spown_task(
+            [&](int i) -> cfn::Task<> {
+                for(;;){
+                    auto r = co_await ch.recv();
+                    if(!r)break;
+                    tmp[i].push_back(*r);
+                }
+                if((cnt_out+=1) == 3){
+                    gsc.stop();
+                }
+            }(i)
+        );
+    }
+
+    gsc.run(4);
+
+    for(auto &v:tmp)
+        for(auto x:v)
+            tmp2.push_back(x);
+    
+    std::sort(tmp2.begin(), tmp2.end());
+
+    std::vector<int> expected;
+    for(int i=0;i<10;++i){
+        for(int k=0;k<10;++k){
+            expected.push_back(i);
+        }
+    }
+    IUTEST_ASSERT_EQ(expected, tmp2);
 }
 
 /*
