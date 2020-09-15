@@ -188,6 +188,36 @@ IUTEST(BasicChannel, SendRecvMultiInMultiOut){
     IUTEST_ASSERT_EQ(expected, tmp2);
 }
 
+IUTEST(BasicChannel, Select){
+    std::vector<int> tmp;
+    auto ch = make_channel<int>(0);
+    auto done_ch = make_channel<int>(0);
+    gsc.spown_task(
+        [&]() -> cfn::Task<> {
+            for(int i=0;i<10;++i)
+            {
+                co_await ch.send(i);
+            }
+            done_ch.close();
+        }());
+    gsc.spown_task(
+        [&]() -> cfn::Task<> {
+            bool done = false;
+            while (!done){
+                co_await cfn::select(
+                    done_ch.recv([&](auto) {
+                        done = true;
+                    }),
+                    ch.recv([&](auto x) {
+                        tmp.push_back(*x);
+                    }));
+            }
+            gsc.stop();
+        }());
+    gsc.run(4);
+    IUTEST_ASSERT_EQ((std::vector{0,1,2,3,4,5,6,7,8,9}), tmp);
+}
+
 /*
 cfn::Task<> send1(MyChannel<int>&ch){
     for(int i=0;i<3;++i){
