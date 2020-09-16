@@ -218,6 +218,46 @@ IUTEST(BasicChannel, Select){
     IUTEST_ASSERT_EQ((std::vector{0,1,2,3,4,5,6,7,8,9}), tmp);
 }
 
+
+IUTEST(BasicChannel, SenderRecver1){
+    std::vector<int> tmp;
+    {
+        auto [sender, recver] = cfn::makeChannel<MyScheduler, int>(gsc,0);
+        for(int i=0;i<10;++i){
+            gsc.spown_task(
+                [](auto sender) -> cfn::Task<> {
+                    for(int i=0;i<10;++i){
+                        co_await sender->send(i);
+                    }
+                }(sender)
+            );
+        }
+
+        gsc.spown_task(
+            [&](auto recver) -> cfn::Task<> {
+                for(;;){
+                    auto r = co_await recver->recv();
+                    if(!r)break;
+                    tmp.push_back(*r);
+                }
+                gsc.stop();
+            }(recver)
+        );
+
+    }
+    gsc.run(4);
+
+    std::sort(tmp.begin(), tmp.end());
+
+    std::vector<int> expected;
+    for(int i=0;i<10;++i){
+        for(int k=0;k<10;++k){
+            expected.push_back(i);
+        }
+    }
+    IUTEST_ASSERT_EQ(expected, tmp);
+}
+
 /*
 cfn::Task<> send1(MyChannel<int>&ch){
     for(int i=0;i<3;++i){

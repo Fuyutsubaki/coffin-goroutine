@@ -81,6 +81,7 @@ struct Goroutine : std::enable_shared_from_this<Goroutine> {
       resume = false;
       current_handle.resume();
     }
+    current_goroutine = nullptr;
   }
 };
 
@@ -325,6 +326,45 @@ struct [[nodiscard]] SelectAwaiter {
 
 template <class... T> SelectAwaiter<T...> select(T... select_case) {
   return {{select_case...}};
+}
+
+template<class Channel>
+class Sender{
+public:
+  Sender(std::shared_ptr<Channel> const &ch):ch(ch){}
+  ~Sender(){
+    std::cout<<ch.use_count()<<std::endl;
+    ch->close();
+  }
+  template<class T>
+  auto send(T && v){
+    return ch->send(std::forward<T>(v));
+  }
+private:
+  std::shared_ptr<Channel> ch;
+};
+template<class Channel>
+class Recver{
+public:
+  Recver(std::shared_ptr<Channel> const &ch):ch(ch){}
+  auto recv(){
+    return ch->recv();
+  }
+private:
+  std::shared_ptr<Channel> ch;
+};
+
+template <class Scheduler, class value_type>
+struct SenderRecver{
+  std::shared_ptr<Sender<BasicChannel<Scheduler,value_type>>> sender;
+  std::shared_ptr<Recver<BasicChannel<Scheduler,value_type>>> recver;
+};
+
+template <class Scheduler, class value_type>
+SenderRecver<Scheduler,value_type> makeChannel(Scheduler scheduler, std::size_t n){
+  using Ch = BasicChannel<Scheduler,value_type>;
+  auto p = std::make_shared<Ch>(scheduler, n);
+  return {std::make_shared<Sender<Ch>>(p), std::make_shared<Recver<Ch>>(p)};
 }
 
 } // namespace cfn
