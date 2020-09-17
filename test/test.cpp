@@ -243,7 +243,6 @@ IUTEST(BasicChannel, SenderRecver1){
                 gsc.stop();
             }(recver)
         );
-
     }
     gsc.run(4);
 

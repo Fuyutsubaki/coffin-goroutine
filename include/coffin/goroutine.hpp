@@ -333,7 +333,6 @@ class Sender{
 public:
   Sender(std::shared_ptr<Channel> const &ch):ch(ch){}
   ~Sender(){
-    std::cout<<ch.use_count()<<std::endl;
     ch->close();
   }
   template<class T>
