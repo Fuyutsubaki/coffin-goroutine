@@ -19,21 +19,21 @@ IUTEST(Goroutine, execute){
     }
 }
 
+cfn::Task<> gen_recursive_task(int &n, int x, int len){
+    if(len == 1){
+        n = x;
+        co_await std::experimental::suspend_always{};
+    }else{
+        co_await gen_recursive_task(n, x, len / 2);
+        co_await gen_recursive_task(n, x + len / 2, len - len / 2);
+    }
+ };
 IUTEST(Goroutine, subtask_call){
     int n;
-    auto gen_subtask = [&](int x) -> cfn::Task<> {
-        for (int i = 0; i < 3; ++i){
-            n = i + x;
-            co_await std::experimental::suspend_always{};
-        }
-    };
-    auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
-        co_await gen_subtask(0);
-        co_await gen_subtask(3);
-    }());
+    auto g = std::make_shared<cfn::Goroutine>(gen_recursive_task(n,0,128));
     // co_await subtask()でsuspendせず
-    // 6回で呼びきれる
-    for(int i=0;i<6;++i){
+    // 128回で呼びきれる
+    for(int i=0;i<128;++i){
         g->execute();
         IUTEST_ASSERT_EQ(i,n);
     }

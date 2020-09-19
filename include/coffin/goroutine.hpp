@@ -19,13 +19,13 @@ template <class value_type = void> struct Task {
   struct FinalSuspend {
     std::experimental::coroutine_handle<> parent = nullptr;
     bool await_ready() const noexcept { return false; }
-    void await_suspend(std::experimental::coroutine_handle<>) noexcept;
+    std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<>) noexcept;
     void await_resume() noexcept {}
   };
   struct Awaiter {
     handle_type self;
     bool await_ready() const noexcept { return false; }
-    void await_suspend(std::experimental::coroutine_handle<>) noexcept;
+    std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<>) noexcept;
     value_type await_resume() { return self.promise().get(); }
   };
 
@@ -46,7 +46,7 @@ template <class value_type = void> struct Task {
     auto get_return_object() { return Task{handle_type::from_promise(*this)}; }
     std::experimental::suspend_always initial_suspend() { return {}; }
     FinalSuspend final_suspend() noexcept { return {parent}; }
-    std::experimental::coroutine_handle<> parent = nullptr;
+    std::experimental::coroutine_handle<> parent = std::experimental::noop_coroutine();
   };
   auto operator co_await() { return Awaiter{coro_}; }
 
@@ -65,7 +65,6 @@ struct Goroutine : std::enable_shared_from_this<Goroutine> {
   Goroutine(Task<> &&t) : task(std::move(t)), current_handle(task.coro_) {}
   Task<> task;
   std::experimental::coroutine_handle<> current_handle;
-  bool resume = false;
   std::size_t wakeup_id = 0;
   std::atomic<bool> on_select_detect_wait;
   // mutex 何とかなくせないか。
@@ -75,28 +74,24 @@ struct Goroutine : std::enable_shared_from_this<Goroutine> {
   std::mutex mutex;
   void execute() {
     std::scoped_lock lock{mutex};
-    resume = true;
     current_goroutine = shared_from_this();
-    while (resume && current_handle) {
-      resume = false;
-      current_handle.resume();
-    }
+    current_handle.resume();
     current_goroutine = nullptr;
   }
 };
 
 template <class value_type>
-void Task<value_type>::FinalSuspend::await_suspend(
+std::experimental::coroutine_handle<> Task<value_type>::FinalSuspend::await_suspend(
     std::experimental::coroutine_handle<>) noexcept {
   current_goroutine->current_handle = parent;
-  current_goroutine->resume = true;
+  return parent;
 }
 template <class value_type>
-void Task<value_type>::Awaiter::await_suspend(
+std::experimental::coroutine_handle<> Task<value_type>::Awaiter::await_suspend(
     std::experimental::coroutine_handle<> h) noexcept {
   self.promise().parent = h;
   current_goroutine->current_handle = self;
-  current_goroutine->resume = true;
+  return self;
 }
 
 namespace detail {
