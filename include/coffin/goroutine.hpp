@@ -7,46 +7,66 @@
 #include <list>
 #include <mutex>
 #include <optional>
+#include <variant>
 
 namespace cfn {
 
 struct Goroutine;
 thread_local inline std::shared_ptr<Goroutine> current_goroutine = nullptr;
 
+namespace detail {
+struct ExceptionHandler {
+  std::exception_ptr e;
+};
+} // namespace detail
 template <class value_type = void> struct Task {
   struct promise_type;
   using handle_type = std::experimental::coroutine_handle<promise_type>;
   struct FinalSuspend {
     std::experimental::coroutine_handle<> parent = nullptr;
     bool await_ready() const noexcept { return false; }
-    std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<>) noexcept;
+    std::experimental::coroutine_handle<>
+        await_suspend(std::experimental::coroutine_handle<>) noexcept;
     void await_resume() noexcept {}
   };
   struct Awaiter {
     handle_type self;
     bool await_ready() const noexcept { return false; }
-    std::experimental::coroutine_handle<> await_suspend(std::experimental::coroutine_handle<>) noexcept;
-    value_type await_resume() { return self.promise().get(); }
+    std::experimental::coroutine_handle<>
+        await_suspend(std::experimental::coroutine_handle<>) noexcept;
+    value_type await_resume() { return self.promise().get_or_rethrow(); }
   };
 
   template <class T> struct promise_type1 {
-    template<class U>
-    void return_value(U && v) { val = std::forward<U>(v); }
-    void unhandled_exception() { std::terminate(); }
-    value_type val;
-    auto get() { return std::move(val); }
+    template <class U> void return_value(U &&v) { val = std::forward<U>(v); }
+    void unhandled_exception() {
+      val = detail::ExceptionHandler{std::current_exception()};
+    }
+    std::variant<detail::ExceptionHandler, value_type> val;
+    auto get_or_rethrow() {
+      if (auto p = std::get_if<detail::ExceptionHandler>(&val)) {
+        std::rethrow_exception(p->e);
+      }
+      return std::move(std::get<value_type>(val));
+    }
   };
   template <> struct promise_type1<void> {
     void return_void() {}
-    void unhandled_exception() { std::terminate(); }
-    auto get() {}
+    void unhandled_exception() { ep = std::current_exception(); }
+    std::exception_ptr ep;
+    auto get_or_rethrow() {
+      if (ep) {
+        std::rethrow_exception(ep);
+      }
+    }
   };
   struct promise_type : promise_type1<value_type> {
     promise_type() {}
     auto get_return_object() { return Task{handle_type::from_promise(*this)}; }
     std::experimental::suspend_always initial_suspend() { return {}; }
     FinalSuspend final_suspend() noexcept { return {parent}; }
-    std::experimental::coroutine_handle<> parent = std::experimental::noop_coroutine();
+    std::experimental::coroutine_handle<> parent =
+        std::experimental::noop_coroutine();
   };
   auto operator co_await() { return Awaiter{coro_}; }
 
@@ -65,6 +85,7 @@ struct Goroutine : std::enable_shared_from_this<Goroutine> {
   Goroutine(Task<> &&t) : task(std::move(t)), current_handle(task.coro_) {}
   Task<> task;
   std::experimental::coroutine_handle<> current_handle;
+  // select用メンバ変数。なんとかselect awaiterに閉じ込められないか
   std::size_t wakeup_id = 0;
   std::atomic<bool> on_select_detect_wait;
   // mutex 何とかなくせないか。
@@ -76,12 +97,15 @@ struct Goroutine : std::enable_shared_from_this<Goroutine> {
     std::scoped_lock lock{mutex};
     current_goroutine = shared_from_this();
     current_handle.resume();
+    if (task.coro_.done())
+      task.coro_.promise().get_or_rethrow(); // void or rethrow
     current_goroutine = nullptr;
   }
 };
 
 template <class value_type>
-std::experimental::coroutine_handle<> Task<value_type>::FinalSuspend::await_suspend(
+std::experimental::coroutine_handle<>
+Task<value_type>::FinalSuspend::await_suspend(
     std::experimental::coroutine_handle<>) noexcept {
   current_goroutine->current_handle = parent;
   return parent;
@@ -323,40 +347,33 @@ template <class... T> SelectAwaiter<T...> select(T... select_case) {
   return {{select_case...}};
 }
 
-template<class Channel>
-class Sender{
+template <class Channel> class Sender {
 public:
-  Sender(std::shared_ptr<Channel> const &ch):ch(ch){}
-  ~Sender(){
-    ch->close();
-  }
-  template<class T>
-  auto send(T && v){
-    return ch->send(std::forward<T>(v));
-  }
+  Sender(std::shared_ptr<Channel> const &ch) : ch(ch) {}
+  ~Sender() { ch->close(); }
+  template <class T> auto send(T &&v) { return ch->send(std::forward<T>(v)); }
+
 private:
   std::shared_ptr<Channel> ch;
 };
-template<class Channel>
-class Recver{
+template <class Channel> class Recver {
 public:
-  Recver(std::shared_ptr<Channel> const &ch):ch(ch){}
-  auto recv(){
-    return ch->recv();
-  }
+  Recver(std::shared_ptr<Channel> const &ch) : ch(ch) {}
+  auto recv() { return ch->recv(); }
+
 private:
   std::shared_ptr<Channel> ch;
 };
 
-template <class Scheduler, class value_type>
-struct SenderRecver{
-  std::shared_ptr<Sender<BasicChannel<Scheduler,value_type>>> sender;
-  std::shared_ptr<Recver<BasicChannel<Scheduler,value_type>>> recver;
+template <class Scheduler, class value_type> struct SenderRecver {
+  std::shared_ptr<Sender<BasicChannel<Scheduler, value_type>>> sender;
+  std::shared_ptr<Recver<BasicChannel<Scheduler, value_type>>> recver;
 };
 
 template <class Scheduler, class value_type>
-SenderRecver<Scheduler,value_type> makeChannel(Scheduler scheduler, std::size_t n){
-  using Ch = BasicChannel<Scheduler,value_type>;
+SenderRecver<Scheduler, value_type> makeChannel(Scheduler scheduler,
+                                                std::size_t n) {
+  using Ch = BasicChannel<Scheduler, value_type>;
   auto p = std::make_shared<Ch>(scheduler, n);
   return {std::make_shared<Sender<Ch>>(p), std::make_shared<Recver<Ch>>(p)};
 }

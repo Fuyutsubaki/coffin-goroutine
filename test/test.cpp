@@ -38,6 +38,39 @@ IUTEST(Goroutine, subtask_call){
         IUTEST_ASSERT_EQ(i,n);
     }
 }
+IUTEST(Goroutine, subtask_exception){
+    {
+        auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+            co_await []() -> cfn::Task<> {
+                throw 42;
+                co_await std::experimental::suspend_always{};
+            }();
+
+            co_await std::experimental::suspend_always{};
+        }());
+
+        IUTEST_ASSERT_THROW_VALUE_EQ(g->execute(), int, 42);
+    }
+    {
+        int n = 0;
+        auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+            try
+            {
+                co_await []() -> cfn::Task<int> {
+                    throw 42;
+                    co_await std::experimental::suspend_always{};
+                    co_return 5;
+                }();
+            }
+            catch (int x)
+            {
+                n = x;
+            }
+        }());
+        g->execute();
+        IUTEST_ASSERT_EQ(42, n);
+    }
+}
 
 IUTEST(Goroutine, subtask_return){
     int n;
@@ -256,75 +289,3 @@ IUTEST(BasicChannel, SenderRecver1){
     }
     IUTEST_ASSERT_EQ(expected, tmp);
 }
-
-/*
-cfn::Task<> send1(MyChannel<int>&ch){
-    for(int i=0;i<3;++i){
-        co_await ch.send(i);
-    }
-}
-
-cfn::Task<> send2(MyChannel<int>&ch, MyChannel<int>&done_ch){
-    co_await send1(ch);
-    co_await send1(ch);
-    co_await send1(ch);
-
-    done_ch.close();
-}
-
-cfn::Task<> recv(MyChannel<int>&ch, MyChannel<int>&done_ch, std::atomic<bool> & all_done, std::vector<int>&tmp){
-    int  done = false;
-    while(!done){
-        co_await cfn::select(
-            done_ch.recv([&](auto){
-                done = true;
-            }),
-            ch.recv([&](auto x){
-                tmp.push_back(*x);
-            })
-        );
-    }
-    all_done.store(true);
-}
-
-// move only type
-cfn::Task<> send_move(MyChannel<std::unique_ptr<int>>&ch){
-    co_await ch.send(std::make_unique<int>(32));
-}
-
-cfn::Task<> recv_move(MyChannel<int>&ch){
-    auto x = co_await ch.recv();
-}
-
-
-IUTEST(test_common, Ch)
-{
-    MyChannel<int> ch(MyScheduler{},0);
-    MyChannel<int> done_ch(MyScheduler{},0);
-    std::atomic<bool> all_done = false;
-    std::vector<int> tmp;
-
-    MyScheduler::spown_task(send2(ch, done_ch));
-    MyScheduler::spown_task(recv(ch, done_ch, all_done, tmp));
-    
-    // ガバガバスレッドプール
-    std::vector<std::thread> worker;
-    for(int i=0;i<3;++i){
-        std::thread th{[&]{
-           while(!all_done.load()){
-               auto task = MyScheduler::dequeue_task();
-               if(task){
-                   task->execute();
-               }else{
-                   std::this_thread::yield();
-               }
-           }
-        }};
-        worker.emplace_back(std::move(th));
-    }
-    for(auto&th:worker){
-        th.join();
-    }
-    assert(tmp == (std::vector{0,1,2,0,1,2,0,1,2})); // 本当に？
-}
-*/
