@@ -38,6 +38,39 @@ IUTEST(Goroutine, subtask_call){
         IUTEST_ASSERT_EQ(i,n);
     }
 }
+IUTEST(Goroutine, subtask_exception){
+    {
+        auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+            co_await []() -> cfn::Task<> {
+                throw 42;
+                co_await std::experimental::suspend_always{};
+            }();
+
+            co_await std::experimental::suspend_always{};
+        }());
+
+        IUTEST_ASSERT_THROW_VALUE_EQ(g->execute(), int, 42);
+    }
+    {
+        int n = 0;
+        auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
+            try
+            {
+                co_await []() -> cfn::Task<int> {
+                    throw 42;
+                    co_await std::experimental::suspend_always{};
+                    co_return 5;
+                }();
+            }
+            catch (int x)
+            {
+                n = x;
+            }
+        }());
+        g->execute();
+        IUTEST_ASSERT_EQ(42, n);
+    }
+}
 
 IUTEST(Goroutine, subtask_return){
     int n;

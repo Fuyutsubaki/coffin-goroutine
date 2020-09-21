@@ -7,6 +7,7 @@
 #include <list>
 #include <mutex>
 #include <optional>
+#include <variant>
 
 namespace cfn {
 
@@ -38,23 +39,24 @@ template <class value_type = void> struct Task {
 
   template <class T> struct promise_type1 {
     template <class U> void return_value(U &&v) { val = std::forward<U>(v); }
-    void unhandled_exception() { ep = std::current_exception(); }
-    std::exception_ptr ep;
-    value_type val;
+    void unhandled_exception() {
+      val = detail::ExceptionHandler{std::current_exception()};
+    }
+    std::variant<detail::ExceptionHandler, value_type> val;
     auto get_or_rethrow() {
-      if (ep) {
-        std::rethrow_exception(ep);
+      if (auto p = std::get_if<detail::ExceptionHandler>(&val)) {
+        std::rethrow_exception(p->e);
       }
-      return std::move(val);
+      return std::move(std::get<value_type>(val));
     }
   };
   template <> struct promise_type1<void> {
     void return_void() {}
-    void unhandled_exception() { ep2 = std::current_exception(); }
-    std::exception_ptr ep2;
+    void unhandled_exception() { ep = std::current_exception(); }
+    std::exception_ptr ep;
     auto get_or_rethrow() {
-      if (ep2) {
-        std::rethrow_exception(ep2);
+      if (ep) {
+        std::rethrow_exception(ep);
       }
     }
   };
@@ -95,6 +97,8 @@ struct Goroutine : std::enable_shared_from_this<Goroutine> {
     std::scoped_lock lock{mutex};
     current_goroutine = shared_from_this();
     current_handle.resume();
+    if (task.coro_.done())
+      task.coro_.promise().get_or_rethrow(); // void or rethrow
     current_goroutine = nullptr;
   }
 };
