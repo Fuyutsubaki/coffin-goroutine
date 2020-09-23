@@ -94,9 +94,9 @@ struct MyScheduler{
         auto g = std::make_shared<cfn::Goroutine>(std::move(task));
         queue.push_back(g);
     }
-    void push_goroutine(std::shared_ptr<cfn::Goroutine> g){
+    void push_goroutine(std::shared_ptr<cfn::Goroutine> && g){
         std::scoped_lock lock{mutex};
-        queue.push_back(g);
+        queue.push_back(std::move(g));
     }
     std::shared_ptr<cfn::Goroutine> dequeue_task(){
         std::scoped_lock lock{mutex};
@@ -319,8 +319,8 @@ struct BoostThreadpoolScheduler {
 static BoostThreadpoolScheduler gbts;
 struct BoostThreadpoolSchedulerWrapper{
     BoostThreadpoolScheduler & ref_;
-    void push_goroutine(std::shared_ptr<cfn::Goroutine> g){
-        ref_.io_service_.post([=](){g->execute(); });
+    void push_goroutine(std::shared_ptr<cfn::Goroutine> && g){
+        ref_.io_service_.post([g=std::move(g)](){g->execute(); });
     }
 };
 
