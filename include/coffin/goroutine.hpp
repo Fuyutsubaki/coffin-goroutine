@@ -200,10 +200,10 @@ public:
       if (ch.closed) {
         assert(false);
       } else if (auto opt = dequeueSudog(ch.recv_queue)) {
-        auto sdg = *opt;
+        auto &sdg = *opt;
         *sdg.val = std::move(val);
         sdg.task->wakeup_id = sdg.wakeup_id;
-        ch.scheduler.push_goroutine(sdg.task);
+        ch.scheduler.push_goroutine(std::move(sdg.task));
         return true;
       } else if (ch.value_queue.size() < ch.queue_limit) {
         ch.value_queue.push_back(std::move(val));
@@ -245,20 +245,20 @@ public:
         val = ch.value_queue.front();
         ch.value_queue.pop_front();
         if (auto opt = dequeueSudog(ch.send_queue)) {
-          auto sdg = *opt;
+          auto &sdg = *opt;
           ch.value_queue.push_back(*sdg.val);
           sdg.task->wakeup_id = sdg.wakeup_id;
-          ch.scheduler.push_goroutine(sdg.task);
+          ch.scheduler.push_goroutine(std::move(sdg.task));
         }
         return true;
       } else if (ch.closed) {
         val = std::nullopt;
         return true;
       } else if (auto opt = dequeueSudog(ch.send_queue)) {
-        auto sdg = *opt;
+        auto &sdg = *opt;
         val = std::move(*sdg.val);
         sdg.task->wakeup_id = sdg.wakeup_id;
-        ch.scheduler.push_goroutine(sdg.task);
+        ch.scheduler.push_goroutine(std::move(sdg.task));
         return true;
       }
       return false;
@@ -282,10 +282,10 @@ public:
       assert(false);
     }
     while (auto opt = dequeueSudog(recv_queue)) {
-      auto sdg = *opt;
+      auto &sdg = *opt;
       *sdg.val = std::nullopt;
       sdg.task->wakeup_id = sdg.wakeup_id;
-      scheduler.push_goroutine(sdg.task);
+      scheduler.push_goroutine(std::move(sdg.task));
     }
   }
   Scheduler scheduler;
