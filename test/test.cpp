@@ -4,6 +4,7 @@
 #include <thread>
 #include<vector>
 #include<array>
+#include<iostream>
 
 IUTEST(Goroutine, execute){
     int n;
@@ -93,9 +94,8 @@ struct MyScheduler{
         auto g = std::make_shared<cfn::Goroutine>(std::move(task));
         queue.push_back(g);
     }
-    void push_goroutine(std::shared_ptr<cfn::Goroutine> g, std::size_t wakeup_id){
+    void push_goroutine(std::shared_ptr<cfn::Goroutine> g){
         std::scoped_lock lock{mutex};
-        g->wakeup_id = wakeup_id;
         queue.push_back(g);
     }
     std::shared_ptr<cfn::Goroutine> dequeue_task(){
@@ -113,7 +113,7 @@ struct MyScheduler{
     void run(std::size_t num){
         on_ready.store(true);
         std::vector<std::thread> worker;
-        for(int i=0;i<3;++i){
+        for(int i=0;i<num;++i){
             std::thread th{[&]{
             while(on_ready.load()){
                 auto task = MyScheduler::dequeue_task();
@@ -143,7 +143,7 @@ MyChannel<T> make_channel(std::size_t queue_size){
 
 
 IUTEST(BasicChannel, SendRecv){
-    for(int i=0;i<10;++i){
+    for(int i=1;i<10;++i){
         std::vector<int> tmp;
         auto ch = make_channel<int>(4);
         gsc.spown_task(
@@ -278,6 +278,81 @@ IUTEST(BasicChannel, SenderRecver1){
         );
     }
     gsc.run(4);
+
+    std::sort(tmp.begin(), tmp.end());
+
+    std::vector<int> expected;
+    for(int i=0;i<10;++i){
+        for(int k=0;k<10;++k){
+            expected.push_back(i);
+        }
+    }
+    IUTEST_ASSERT_EQ(expected, tmp);
+}
+
+#include<boost/asio.hpp>
+
+struct BoostThreadpoolScheduler {
+    boost::asio::io_service io_service_;
+    std::shared_ptr<boost::asio::io_service::work> work_ = std::make_shared<boost::asio::io_service::work>(boost::asio::io_service::work(io_service_));
+
+    void spown_task(cfn::Task<>&&task){
+        auto g = std::make_shared<cfn::Goroutine>(std::move(task));
+        io_service_.post([=](){g->execute(); });
+    }
+
+    void run(std::size_t n){
+        std::vector<std::thread> thread_list;
+        for (std::size_t i = 0; i < n; ++i) {
+            thread_list.push_back(std::thread{[&]{io_service_.run();}});
+        }
+        for(auto&th:thread_list)
+            th.join();
+
+        io_service_.reset();
+    }
+
+    void stop(){
+        work_.reset();
+    }
+};
+static BoostThreadpoolScheduler gbts;
+struct BoostThreadpoolSchedulerWrapper{
+    BoostThreadpoolScheduler & ref_;
+    void push_goroutine(std::shared_ptr<cfn::Goroutine> g){
+        ref_.io_service_.post([=](){g->execute(); });
+    }
+};
+
+template<class value_type>
+using MyChannel2 = cfn::BasicChannel<BoostThreadpoolSchedulerWrapper, value_type>;
+
+IUTEST(WithBoostAsio, SenderRecver1){
+    std::vector<int> tmp;
+    {
+        auto [sender, recver] = cfn::makeChannel<BoostThreadpoolSchedulerWrapper, int>(BoostThreadpoolSchedulerWrapper{gbts}, 0);
+        for(int i=0;i<10;++i){
+            gbts.spown_task(
+                [](auto sender) -> cfn::Task<> {
+                    for(int i=0;i<10;++i){
+                        co_await sender->send(i);
+                    }
+                }(sender)
+            );
+        }
+
+        gbts.spown_task(
+            [&](auto recver) -> cfn::Task<> {
+                for(;;){
+                    auto r = co_await recver->recv();
+                    if(!r)break;
+                    tmp.push_back(*r);
+                }
+                gbts.stop();
+            }(recver)
+        );
+    }
+    gbts.run(4);
 
     std::sort(tmp.begin(), tmp.end());
 

@@ -3,5 +3,5 @@ iutest/include/iutest.hpp:
 
 .PHONY:test
 test: iutest/include/iutest.hpp
-	clang++-10 test.cpp -I iutest/include/ -I ../include/ -lpthread -std=c++2a -stdlib=libc++ -o test
+	clang++-10 test.cpp -I iutest/include/ -I ../include/ -lpthread -lboost_system  -std=c++2a -stdlib=libc++ -g -o test
 	./test
