@@ -144,11 +144,11 @@ MyChannel<T> make_channel(std::size_t queue_size){
 IUTEST(BasicChannel, SendRecv){
     for(int i=1;i<10;++i){
         std::vector<int> tmp;
-        auto ch = make_channel<int>(4);
+        auto ch = make_channel<std::unique_ptr<int>>(4);
         gsc.spown_task(
             [&]() -> cfn::Task<> {
                 for(int i=0;i<10;++i){
-                    co_await ch.send(i);
+                    co_await ch.send(std::make_unique<int>(i));
                 }
                 ch.close();
             }()
@@ -158,7 +158,7 @@ IUTEST(BasicChannel, SendRecv){
                 for(;;){
                     auto r = co_await ch.recv();
                     if(!r)break;
-                    tmp.push_back(*r);
+                    tmp.push_back(**r);
                 }
                 gsc.stop();
             }()

@@ -265,7 +265,7 @@ public:
       enqueueSudog(ch.recv_queue, RecvSudog{&val, std::move(task), 0, false});
       return true;
     }
-    auto await_resume() const noexcept { return val; }
+    auto await_resume() noexcept { return std::move(val); }
 
     bool try_nonblock_exec() { return nonblock_recv(); }
     void block_exec(std::size_t wakeup_id) {
@@ -277,11 +277,11 @@ public:
 
     bool nonblock_recv() {
       if (ch.value_queue.size() > 0) {
-        val = ch.value_queue.front();
+        val = std::move(ch.value_queue.front());
         ch.value_queue.pop_front();
         if (auto opt = dequeueSudog(ch.send_queue)) {
           auto &sdg = *opt;
-          ch.value_queue.push_back(*sdg.val);
+          ch.value_queue.push_back(std::move(*sdg.val));
           sdg.task.state->wakeup_id = sdg.wakeup_id;
           ch.scheduler.push_goroutine(std::move(sdg.task));
         }
