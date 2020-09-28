@@ -211,19 +211,22 @@ public:
       return false;
     } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
     bool await_suspend(std::experimental::coroutine_handle<>) {
-      std::scoped_lock lock{ch.mutex};
-      auto task = current_goroutine->to_goroutine();
-      bool r = nonblock_send();
-      if (r)
-        return false;
-      enqueueSudog(ch.send_queue, SendSudog{&val, std::move(task), 0, false});
-      return true;
+      std::shared_ptr<GoroutineState> ref_extend;
+      bool r = false;
+      {
+        std::scoped_lock lock{ch.mutex};
+        auto task = current_goroutine->to_goroutine();
+        std::tie(r, ref_extend) = nonblock_send();
+        if (!r)
+          enqueueSudog(ch.send_queue, SendSudog{&val, std::move(task), 0, false});
+      }
+      return !r;
     }
 
     void await_resume() const noexcept {}
 
     // select用
-    bool try_nonblock_exec() { return nonblock_send(); }
+    auto try_nonblock_exec() { return nonblock_send(); }
     void block_exec(std::size_t wakeup_id) {
       auto task = current_goroutine->to_goroutine();
       it = enqueueSudog(ch.send_queue, SendSudog{&val, std::move(task), wakeup_id, true});
@@ -231,20 +234,21 @@ public:
     void release_sudog() { ch.send_queue.erase(it); }
     void invoke_callback() { f(); }
 
-    bool nonblock_send() {
+    std::tuple<bool, std::shared_ptr<GoroutineState>> nonblock_send() {
       if (ch.closed) {
         assert(false);
       } else if (auto opt = dequeueSudog(ch.recv_queue)) {
         auto &sdg = *opt;
         *sdg.val = std::move(val);
         sdg.task.state->wakeup_id = sdg.wakeup_id;
+        auto state = sdg.task.state;
         ch.scheduler.push_goroutine(std::move(sdg.task));
-        return true;
+        return {true, state};
       } else if (ch.value_queue.size() < ch.queue_limit) {
         ch.value_queue.push_back(std::move(val));
-        return true;
+        return {true, nullptr};
       }
-      return false;
+      return {false, nullptr};;
     }
   };
 
@@ -257,17 +261,20 @@ public:
       return false;
     } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
     bool await_suspend(std::experimental::coroutine_handle<>) {
-      std::scoped_lock lock{ch.mutex};
-      auto task = current_goroutine->to_goroutine();
-      bool r = nonblock_recv();
-      if (r)
-        return false;
-      enqueueSudog(ch.recv_queue, RecvSudog{&val, std::move(task), 0, false});
-      return true;
+      std::shared_ptr<GoroutineState> ref_extend;
+      bool r = false;
+      {
+        std::scoped_lock lock{ch.mutex};
+        auto task = current_goroutine->to_goroutine();
+        std::tie(r, ref_extend) = nonblock_recv();
+        if (!r)
+          enqueueSudog(ch.recv_queue, RecvSudog{&val, std::move(task), 0, false});
+      }
+      return !r;
     }
     auto await_resume() noexcept { return std::move(val); }
 
-    bool try_nonblock_exec() { return nonblock_recv(); }
+    auto try_nonblock_exec() { return nonblock_recv(); }
     void block_exec(std::size_t wakeup_id) {
       auto task = current_goroutine->to_goroutine();
       it = enqueueSudog(ch.recv_queue, RecvSudog{&val, std::move(task), wakeup_id, true});
@@ -275,7 +282,7 @@ public:
     void release_sudog() { ch.recv_queue.erase(it); }
     void invoke_callback() { f(val); }
 
-    bool nonblock_recv() {
+    std::tuple<bool,std::shared_ptr<GoroutineState>> nonblock_recv() {
       if (ch.value_queue.size() > 0) {
         val = std::move(ch.value_queue.front());
         ch.value_queue.pop_front();
@@ -283,20 +290,23 @@ public:
           auto &sdg = *opt;
           ch.value_queue.push_back(std::move(*sdg.val));
           sdg.task.state->wakeup_id = sdg.wakeup_id;
+          auto state = sdg.task.state;
           ch.scheduler.push_goroutine(std::move(sdg.task));
+          return {true, state};
         }
-        return true;
+        return {true, nullptr};
       } else if (ch.closed) {
         val = std::nullopt;
-        return true;
+        return {true, nullptr};
       } else if (auto opt = dequeueSudog(ch.send_queue)) {
         auto &sdg = *opt;
         val = std::move(*sdg.val);
         sdg.task.state->wakeup_id = sdg.wakeup_id;
+        auto state = sdg.task.state;
         ch.scheduler.push_goroutine(std::move(sdg.task));
-        return true;
+        return {true, state};
       }
-      return false;
+      return {false, nullptr};
     }
   };
 
@@ -344,25 +354,29 @@ struct [[nodiscard]] SelectAwaiter {
     return false;
   } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
   bool await_suspend(std::experimental::coroutine_handle<>) noexcept {
-    auto lock = std::apply(
-        [](auto &... t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
     bool r = false;
-    detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
-      if (!r) {
-        r = std::get<I()>(sc_list).try_nonblock_exec();
-        if (r) {
-          wakeup_id = I();
+    std::shared_ptr<GoroutineState> ref_extend;
+    {  // lock block
+      auto lock = std::apply(
+          [](auto &... t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
+
+      detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
+        if (!r) {
+          std::tie(r, ref_extend) = std::get<I()>(sc_list).try_nonblock_exec();
+          if (r) {
+            wakeup_id = I();
+          }
         }
+      });
+      if (!r){
+        require_pass3 = true;
+        current_goroutine->on_select_detect_wait.store(false); // 初期化
+        detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
+          std::get<I()>(sc_list).block_exec(I());
+        });
       }
-    });
-    if (r)
-      return false;
-    require_pass3 = true;
-    current_goroutine->on_select_detect_wait.store(false); // 初期化
-    detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
-      std::get<I()>(sc_list).block_exec(I());
-    });
-    return true;
+    }
+    return !r;
   }
   void await_resume() noexcept {
     // pass 3
