@@ -363,3 +363,45 @@ IUTEST(WithBoostAsio, SenderRecver1){
     }
     IUTEST_ASSERT_EQ(expected, tmp);
 }
+
+
+IUTEST(Example, C100k){
+    std::vector<int> tmp;
+    {
+        auto [sender, recver] = cfn::makeChannel<BoostThreadpoolSchedulerWrapper, int>(BoostThreadpoolSchedulerWrapper{gbts}, 0);
+        gbts.spown_task(
+            [](auto sender) -> cfn::Task<> {
+                for(int i=0;i<10;++i){
+                    co_await sender->send(i);
+                }
+            }(sender)
+        );
+        auto old_recver = recver;
+        for(int i=0;i<100000;++i){
+            auto [new_sender, new_recver] = cfn::makeChannel<BoostThreadpoolSchedulerWrapper, int>(BoostThreadpoolSchedulerWrapper{gbts}, 0);
+            gbts.spown_task(
+                [](auto recver, auto sender) -> cfn::Task<> {
+                    for(;;){
+                        auto r = co_await recver->recv();
+                        if (!r)break;
+                        co_await sender->send(*r+1);
+                    }
+                }(old_recver, new_sender)
+            );
+            old_recver = new_recver;
+        }
+        gbts.spown_task(
+            [&](auto recver) -> cfn::Task<> {
+                for(;;){
+                    auto r = co_await recver->recv();
+                    if (!r)break;
+                    tmp.push_back(*r);
+                }
+            }(old_recver));
+    }
+    gbts.run(4);
+    std::vector<int> expected =  { 100000, 100001, 100002, 100003, 100004, 100005, 100006, 100007, 100008, 100009 };
+
+
+    IUTEST_ASSERT_EQ(expected, tmp);
+}
