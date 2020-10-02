@@ -164,34 +164,51 @@ template <class value_type> struct Sudog {
   using Iter = typename std::list<Sudog>::iterator;
 };
 
-template <class Sudog>
-static std::optional<Sudog> dequeueSudog(std::list<Sudog> &queue) {
-  for (auto it = queue.begin(); it != queue.end(); ++it) {
-    if (it->is_select) {
-      bool expected = false;
-      bool r = it->task.state &&
-               it->task.state->on_select_detect_wait.compare_exchange_strong(
-                   expected, true); // TODO
-      if (r) {
-        return std::move(
-            *it); // selectの場合、要素の開放はselectの解放処理に任せる
+template <class Sudog> struct SudogList {
+  using Iter = typename Sudog::Iter;
+  std::list<Sudog> queue;
+  Iter pos = queue.end();
+  std::optional<Sudog> dequeueSudog() {
+    for (; pos != queue.end(); ++pos) {
+      if (pos->is_select) {
+        bool expected = false;
+        bool r = pos->task.state &&
+                 pos->task.state->on_select_detect_wait.compare_exchange_strong(
+                     expected, true); // TODO
+        if (r) {
+          // selectの場合、要素の解放はselectの解放処理に任せる
+          auto x = std::move(*pos);
+          pos++;
+          return std::move(x);
+        }
+      } else {
+        auto it = pos;
+        pos++;
+        auto x = std::move(*it);
+        queue.erase(it);
+        return x;
       }
-    } else {
-      auto x = std::move(*it);
-      queue.erase(it);
-      return x;
     }
+    return {};
   }
-  return {};
-}
 
-template <class Sudog>
-static typename Sudog::Iter enqueueSudog(std::list<Sudog> &queue, Sudog sdg) {
-  queue.push_back(std::move(sdg));
-  auto it = queue.end();
-  it--;
-  return it;
-}
+  Iter enqueueSudog(Sudog sdg) {
+    queue.push_back(std::move(sdg));
+    auto it = queue.end();
+    it--;
+    if (pos == queue.end()) {
+      pos = it;
+    }
+    return it;
+  }
+  void eraseSudog(Iter it) {
+    if (pos == it) {
+      pos++;
+    }
+    queue.erase(it);
+  }
+};
+
 template <std::size_t... I, class F>
 void integral_constant_each(std::index_sequence<I...>, F f) {
   int v[] = {(f(std::integral_constant<std::size_t, I>{}), 0)...};
@@ -222,8 +239,8 @@ public:
         auto task = current_goroutine->to_goroutine();
         std::tie(r, next_goroutine) = nonblock_send();
         if (!r)
-          enqueueSudog(ch.send_queue,
-                       SendSudog{&val, std::move(task), 0, false});
+          ch.send_queue.enqueueSudog(
+              SendSudog{&val, std::move(task), 0, false});
       }
       if (next_goroutine)
         ch.scheduler.push_goroutine(std::move(*next_goroutine));
@@ -236,16 +253,16 @@ public:
     auto try_nonblock_exec() { return nonblock_send(); }
     void block_exec(std::size_t wakeup_id) {
       auto task = current_goroutine->to_goroutine();
-      it = enqueueSudog(ch.send_queue,
-                        SendSudog{&val, std::move(task), wakeup_id, true});
+      it = ch.send_queue.enqueueSudog(
+          SendSudog{&val, std::move(task), wakeup_id, true});
     }
-    void release_sudog() { ch.send_queue.erase(it); }
+    void release_sudog() { ch.send_queue.eraseSudog(it); }
     void invoke_callback() { f(); }
 
     std::tuple<bool, std::optional<Goroutine>> nonblock_send() {
       if (ch.closed) {
         assert(false);
-      } else if (auto opt = dequeueSudog(ch.recv_queue)) {
+      } else if (auto opt = ch.recv_queue.dequeueSudog()) {
         auto &sdg = *opt;
         *sdg.val = std::move(val);
         sdg.task.state->wakeup_id = sdg.wakeup_id;
@@ -275,8 +292,8 @@ public:
         auto task = current_goroutine->to_goroutine();
         std::tie(r, next_goroutine) = nonblock_recv();
         if (!r)
-          enqueueSudog(ch.recv_queue,
-                       RecvSudog{&val, std::move(task), 0, false});
+          ch.recv_queue.enqueueSudog(
+              RecvSudog{&val, std::move(task), 0, false});
       }
       if (next_goroutine)
         ch.scheduler.push_goroutine(std::move(*next_goroutine));
@@ -287,17 +304,17 @@ public:
     auto try_nonblock_exec() { return nonblock_recv(); }
     void block_exec(std::size_t wakeup_id) {
       auto task = current_goroutine->to_goroutine();
-      it = enqueueSudog(ch.recv_queue,
-                        RecvSudog{&val, std::move(task), wakeup_id, true});
+      it = ch.recv_queue.enqueueSudog(
+          RecvSudog{&val, std::move(task), wakeup_id, true});
     }
-    void release_sudog() { ch.recv_queue.erase(it); }
+    void release_sudog() { ch.recv_queue.eraseSudog(it); }
     void invoke_callback() { f(val); }
 
     std::tuple<bool, std::optional<Goroutine>> nonblock_recv() {
       if (ch.value_queue.size() > 0) {
         val = std::move(ch.value_queue.front());
         ch.value_queue.pop_front();
-        if (auto opt = dequeueSudog(ch.send_queue)) {
+        if (auto opt = ch.send_queue.dequeueSudog()) {
           auto &sdg = *opt;
           ch.value_queue.push_back(std::move(*sdg.val));
           sdg.task.state->wakeup_id = sdg.wakeup_id;
@@ -307,7 +324,7 @@ public:
       } else if (ch.closed) {
         val = std::nullopt;
         return {true, std::nullopt};
-      } else if (auto opt = dequeueSudog(ch.send_queue)) {
+      } else if (auto opt = ch.send_queue.dequeueSudog()) {
         auto &sdg = *opt;
         val = std::move(*sdg.val);
         sdg.task.state->wakeup_id = sdg.wakeup_id;
@@ -330,10 +347,10 @@ public:
   void close() {
     std::scoped_lock lock{mutex};
     closed = true;
-    while (auto opt = dequeueSudog(send_queue)) {
+    while (auto opt = send_queue.dequeueSudog()) {
       assert(false);
     }
-    while (auto opt = dequeueSudog(recv_queue)) {
+    while (auto opt = recv_queue.dequeueSudog()) {
       auto &sdg = *opt;
       *sdg.val = std::nullopt;
       sdg.task.state->wakeup_id = sdg.wakeup_id;
@@ -348,8 +365,8 @@ public:
   std::size_t queue_limit;
   std::deque<value_type> value_queue;
 
-  std::list<RecvSudog> recv_queue;
-  std::list<SendSudog> send_queue;
+  detail::SudogList<RecvSudog> recv_queue;
+  detail::SudogList<SendSudog> send_queue;
   bool closed = false;
 };
 
@@ -425,7 +442,9 @@ template <class Channel> class Sender {
 public:
   Sender(std::shared_ptr<Channel> const &ch) : ch(ch) {}
   ~Sender() { ch->close(); }
-  template <class T> auto send(T &&v) { return ch->send(std::forward<T>(v)); }
+  template <class... T> auto send(T &&... args) {
+    return ch->send(std::forward<T>(args)...);
+  }
 
 private:
   std::shared_ptr<Channel> ch;
@@ -433,7 +452,9 @@ private:
 template <class Channel> class Recver {
 public:
   Recver(std::shared_ptr<Channel> const &ch) : ch(ch) {}
-  auto recv() { return ch->recv(); }
+  template <class... T> auto recv(T &&... args) {
+    return ch->recv(std::forward<T>(args)...);
+  }
 
 private:
   std::shared_ptr<Channel> ch;
