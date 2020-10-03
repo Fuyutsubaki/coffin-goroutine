@@ -90,12 +90,9 @@ public:
   void execute();
 };
 
-class Goroutine {
-public:
+struct Goroutine {
   std::shared_ptr<GoroutineState> state;
   Goroutine(std::shared_ptr<GoroutineState> p) : state(p) {}
-
-public:
   Goroutine(Task<> &&t)
       : state(std::make_shared<GoroutineState>(std::move(t))) {}
   Goroutine(Goroutine const &src) = delete;
@@ -116,13 +113,10 @@ struct GoroutineState : std::enable_shared_from_this<GoroutineState> {
   GoroutineState(Task<> &&t) : task(std::move(t)), current_handle(task.coro_) {}
   Task<> task;
   std::experimental::coroutine_handle<> current_handle;
-  // select用メンバ変数。なんとかselect awaiterに閉じ込められないか
+  // select
   std::size_t wakeup_id = 0;
   std::atomic<bool> on_select_detect_wait = false;
-  // mutex 何とかなくせないか。
-  // たとえばgoroutineのpushやchのmutexの解除を
-  // https://github.com/golang/go/blob/5c2c6d3fbf4f0a1299b5e41463847d242eae19ca/src/runtime/proc.go#L306
-  // みたいな方法にするとか
+
   std::mutex mutex;
 
   void execute() {
@@ -164,26 +158,27 @@ template <class value_type> struct Sudog {
   using Iter = typename std::list<Sudog>::iterator;
 };
 
-template <class Sudog> struct SudogList {
+template <class Sudog> class SudogList {
   using Iter = typename Sudog::Iter;
   std::list<Sudog> queue;
-  Iter pos = queue.end();
+  Iter hint_iter = queue.end();
+public:
   std::optional<Sudog> dequeueSudog() {
-    for (; pos != queue.end(); ++pos) {
-      if (pos->is_select) {
+    for (; hint_iter != queue.end(); ++hint_iter) {
+      if (hint_iter->is_select) {
         bool expected = false;
-        bool r = pos->task.state &&
-                 pos->task.state->on_select_detect_wait.compare_exchange_strong(
+        bool r = hint_iter->task.state &&
+                 hint_iter->task.state->on_select_detect_wait.compare_exchange_strong(
                      expected, true); // TODO
         if (r) {
           // selectの場合、要素の解放はselectの解放処理に任せる
-          auto x = std::move(*pos);
-          pos++;
+          auto x = std::move(*hint_iter);
+          hint_iter++;
           return std::move(x);
         }
       } else {
-        auto it = pos;
-        pos++;
+        auto it = hint_iter;
+        hint_iter++;
         auto x = std::move(*it);
         queue.erase(it);
         return x;
@@ -196,14 +191,14 @@ template <class Sudog> struct SudogList {
     queue.push_back(std::move(sdg));
     auto it = queue.end();
     it--;
-    if (pos == queue.end()) {
-      pos = it;
+    if (hint_iter == queue.end()) {
+      hint_iter = it;
     }
     return it;
   }
   void eraseSudog(Iter it) {
-    if (pos == it) {
-      pos++;
+    if (hint_iter == it) {
+      hint_iter++;
     }
     queue.erase(it);
   }
@@ -216,10 +211,16 @@ void integral_constant_each(std::index_sequence<I...>, F f) {
 }
 } // namespace detail
 
-template <class Scheduler, class value_type> class BasicChannel {
+template <class T>
+concept ChannelStrategy = requires (T strategy) {
+  // - require: thread safe
+  strategy.push_goroutine(std::declval<Goroutine>());
+};
+
+template <ChannelStrategy Strategy, class value_type> class BasicChannel {
 public:
-  BasicChannel(Scheduler scheduler, std::size_t limit)
-      : scheduler(scheduler), queue_limit(limit) {}
+  BasicChannel(Strategy strategy, std::size_t limit)
+      : strategy(strategy), queue_limit(limit) {}
   using SendSudog = detail::Sudog<value_type>;
   using RecvSudog = detail::Sudog<std::optional<value_type>>;
   struct [[nodiscard]] SendAwaiter {
@@ -229,8 +230,8 @@ public:
     std::function<void()> f;
     typename SendSudog::Iter it = {};
     bool await_ready() const noexcept {
-      return false;
-    } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
+      return false; // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
+    } 
     bool await_suspend(std::experimental::coroutine_handle<>) {
       std::optional<Goroutine> next_goroutine;
       bool r = false;
@@ -243,7 +244,7 @@ public:
               SendSudog{&val, std::move(task), 0, false});
       }
       if (next_goroutine)
-        ch.scheduler.push_goroutine(std::move(*next_goroutine));
+        ch.strategy.push_goroutine(std::move(*next_goroutine));
       return !r;
     }
 
@@ -296,7 +297,7 @@ public:
               RecvSudog{&val, std::move(task), 0, false});
       }
       if (next_goroutine)
-        ch.scheduler.push_goroutine(std::move(*next_goroutine));
+        ch.strategy.push_goroutine(std::move(*next_goroutine));
       return !r;
     }
     auto await_resume() noexcept { return std::move(val); }
@@ -354,12 +355,12 @@ public:
       auto &sdg = *opt;
       *sdg.val = std::nullopt;
       sdg.task.state->wakeup_id = sdg.wakeup_id;
-      scheduler.push_goroutine(std::move(sdg.task));
+      strategy.push_goroutine(std::move(sdg.task));
     }
   }
-  Scheduler scheduler;
+  Strategy strategy;
   // mutex内で以下を行ってはならない。deadlockや処理に時間がかかる原因になりうるため
-  // 1. scheduler.push_goroutine()の呼び出し
+  // 1. strategy.push_goroutine()の呼び出し
   // 2. goroutineの参照カウントを増やす行為(goroutineが破棄されることに~Task()が呼び出される)
   std::mutex mutex;
   std::size_t queue_limit;
@@ -409,7 +410,7 @@ struct [[nodiscard]] SelectAwaiter {
       detail::integral_constant_each(
           std::make_index_sequence<N>{}, [&](auto I) {
             if (I() == wakeup_id) {
-              std::get<I()>(sc_list).ch.scheduler.push_goroutine(
+              std::get<I()>(sc_list).ch.strategy.push_goroutine(
                   std::move(*next_goroutine));
             }
           });
@@ -460,27 +461,17 @@ private:
   std::shared_ptr<Channel> ch;
 };
 
-template <class Scheduler, class value_type> struct SenderRecver {
-  std::shared_ptr<Sender<BasicChannel<Scheduler, value_type>>> sender;
-  std::shared_ptr<Recver<BasicChannel<Scheduler, value_type>>> recver;
+template <ChannelStrategy Strategy, class value_type> struct SenderRecver {
+  std::shared_ptr<Sender<BasicChannel<Strategy , value_type>>> sender;
+  std::shared_ptr<Recver<BasicChannel<Strategy, value_type>>> recver;
 };
 
-template <class Scheduler, class value_type>
-SenderRecver<Scheduler, value_type> makeChannel(Scheduler scheduler,
+template <ChannelStrategy Strategy, class value_type>
+SenderRecver<Strategy, value_type> makeChannel(Strategy strategy,
                                                 std::size_t n) {
-  using Ch = BasicChannel<Scheduler, value_type>;
-  auto p = std::make_shared<Ch>(scheduler, n);
+  using Ch = BasicChannel<Strategy, value_type>;
+  auto p = std::make_shared<Ch>(strategy, n);
   return {std::make_shared<Sender<Ch>>(p), std::make_shared<Recver<Ch>>(p)};
 }
 
 } // namespace cfn
-// もしかするとこっちのほうが速いかもしれないが文法がアレになってしまう
-#define CFN_INLINE_SUBTASK(TASK, RETURN_VALUE_REF)                             \
-  do {                                                                         \
-    auto &&t = TASK;                                                           \
-    while (!t.coro_.done()) {                                                  \
-      t.coro_.resume();                                                        \
-      co_await std::experimental::suspend_always{};                            \
-    }                                                                          \
-    RETURN_VALUE_REF = t.coro_.promise().val;                                  \
-  } while (0)
