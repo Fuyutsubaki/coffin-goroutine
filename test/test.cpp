@@ -78,31 +78,31 @@ IUTEST(Goroutine, subtask_return){
     auto gen_subtask = []() -> cfn::Task<std::unique_ptr<int>> {
         co_return std::make_unique<int>(42);
     };
-    auto g = cfn::Goroutine{[&]() -> cfn::Task<> {
+    auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
         n = *(co_await gen_subtask());
-    }()};
-    g.execute();
+    }());
+    g->execute();
     IUTEST_ASSERT_EQ(42, n);
 }
 
 struct MyScheduler{
-    static inline std::deque<cfn::Goroutine> queue;
+    static inline std::deque<std::shared_ptr<cfn::Goroutine>> queue;
     static inline std::mutex mutex;
     static inline std::atomic<bool> on_ready = true;
     void spown_task(cfn::Task<>&&task){
         std::scoped_lock lock{mutex};
-        queue.push_back(cfn::Goroutine{std::move(task)});
+        queue.push_back(std::make_shared<cfn::Goroutine>(std::move(task)));
     }
-    void push_goroutine(cfn::Goroutine && g){
+    void push_goroutine(std::shared_ptr<cfn::Goroutine> && g){
         std::scoped_lock lock{mutex};
-        queue.push_back(std::move(g));
+        queue.push_back(g);
     }
-    std::optional<cfn::Goroutine> dequeue_task(){
+    std::optional<std::shared_ptr<cfn::Goroutine>> dequeue_task(){
         std::scoped_lock lock{mutex};
         if(queue.empty()){
             return std::nullopt;
         }
-        auto p = std::move(queue.front());
+        auto p = queue.front();
         queue.pop_front();
         return p;
     }
@@ -117,7 +117,7 @@ struct MyScheduler{
             while(on_ready.load()){
                 auto task = MyScheduler::dequeue_task();
                 if(task){
-                    task->execute();
+                    (*task)->execute();
                 }else{
                     std::this_thread::yield();
                 }
@@ -296,8 +296,8 @@ struct BoostThreadpoolScheduler {
     std::shared_ptr<boost::asio::io_service::work> work_ = std::make_shared<boost::asio::io_service::work>(boost::asio::io_service::work(io_service_));
 
     void spown_task(cfn::Task<>&&task){
-        auto g = cfn::Goroutine{std::move(task)};
-        io_service_.post([g=std::move(g.move_as_SharedGoroutine())]()mutable{g.execute(); });
+        auto g = std::make_shared<cfn::Goroutine>(std::move(task));
+        io_service_.post([=]()mutable{g->execute(); });
     }
 
     void run(std::size_t n){
@@ -318,8 +318,8 @@ struct BoostThreadpoolScheduler {
 static BoostThreadpoolScheduler gbts;
 struct BoostThreadpoolSchedulerWrapper{
     BoostThreadpoolScheduler & ref_;
-    void push_goroutine(cfn::Goroutine && g){
-        ref_.io_service_.post([g=std::move(g.move_as_SharedGoroutine())]()mutable{g.execute(); });
+    void push_goroutine(std::shared_ptr<cfn::Goroutine> && g){
+        ref_.io_service_.post([=]()mutable{g->execute(); });
     }
 };
 
