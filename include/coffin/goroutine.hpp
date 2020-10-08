@@ -11,6 +11,7 @@
 
 namespace cfn {
 
+class Goroutine;
 namespace detail {
 class GoroutineWrapper;
 struct ExceptionHandler {
