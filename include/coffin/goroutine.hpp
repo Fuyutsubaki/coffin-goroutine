@@ -11,14 +11,14 @@
 
 namespace cfn {
 
-struct GoroutineState;
-thread_local inline GoroutineState *current_goroutine = nullptr;
-
+class Goroutine;
 namespace detail {
+class GoroutineWrapper;
 struct ExceptionHandler {
   std::exception_ptr e;
 };
 } // namespace detail
+
 template <class value_type = void> struct Task {
   struct promise_type;
   using handle_type = std::experimental::coroutine_handle<promise_type>;
@@ -78,81 +78,72 @@ template <class value_type = void> struct Task {
       coro_.destroy();
     }
   }
+
+private:
+  friend Goroutine;
   handle_type coro_;
 };
 
-// workaround for copy only Scheduler (e.g. old boost::asio)
-class SharedGoroutine {
-  std::shared_ptr<GoroutineState> state;
+thread_local inline detail::GoroutineWrapper *current_goroutine = nullptr;
 
-public:
-  SharedGoroutine(std::shared_ptr<GoroutineState> p) : state(p) {}
-  void execute();
-};
-
-struct Goroutine {
-  std::shared_ptr<GoroutineState> state;
-  Goroutine(std::shared_ptr<GoroutineState> p) : state(p) {}
-  Goroutine(Task<> &&t)
-      : state(std::make_shared<GoroutineState>(std::move(t))) {}
-  Goroutine(Goroutine const &src) = delete;
-  Goroutine(Goroutine &&src) : state(std::move(src.state)) {
-    src.state = nullptr;
-  }
-  Goroutine &operator=(Goroutine const &src) = delete;
-  Goroutine &operator=(Goroutine &&src) {
-    state = std::move(src.state);
-    src.state = nullptr;
-    return *this;
-  }
-  void execute();
-  SharedGoroutine move_as_SharedGoroutine() { return {std::move(state)}; }
-};
-
-struct GoroutineState : std::enable_shared_from_this<GoroutineState> {
-  GoroutineState(Task<> &&t) : task(std::move(t)), current_handle(task.coro_) {}
+class Goroutine : public std::enable_shared_from_this<Goroutine> {
+  friend detail::GoroutineWrapper;
   Task<> task;
   std::experimental::coroutine_handle<> current_handle;
   // select
-  std::size_t wakeup_id = 0;
-  std::atomic<bool> on_select_detect_wait = false;
-
+  struct Seldat {
+    std::size_t wakeup_id = 0;
+    std::atomic<bool> on_select_detect_wait = false;
+  };
   std::mutex mutex;
+  Seldat seldat;
 
-  void execute() {
-    std::scoped_lock lock{mutex};
-    current_goroutine = this;
-    current_handle.resume();
-    if (task.coro_.done())
-      task.coro_.promise().get_or_rethrow(); // void or rethrow
-    current_goroutine = nullptr;
-  }
-  Goroutine to_goroutine() { return {shared_from_this()}; }
+public:
+  Goroutine(Task<> &&t) : task(std::move(t)), current_handle(task.coro_) {}
+  void execute();
 };
 
-void Goroutine::execute() { state->execute(); }
+namespace detail {
+struct GoroutineWrapper {
+  std::shared_ptr<Goroutine> p;
+  Goroutine::Seldat &select() { return p->seldat; }
+  std::experimental::coroutine_handle<> &current_handle() {
+    return p->current_handle;
+  }
+  std::shared_ptr<Goroutine> to_goroutine() { return p; };
+};
+} // namespace detail
 
-void SharedGoroutine::execute() { state->execute(); }
+void Goroutine::execute() {
+  std::scoped_lock lock{mutex};
+  detail::GoroutineWrapper c{shared_from_this()};
+  ;
+  current_goroutine = &c;
+  current_handle.resume();
+  if (task.coro_.done())
+    task.coro_.promise().get_or_rethrow(); // void or rethrow
+  current_goroutine = nullptr;
+}
 
 template <class value_type>
 std::experimental::coroutine_handle<>
 Task<value_type>::FinalSuspend::await_suspend(
     std::experimental::coroutine_handle<>) noexcept {
-  current_goroutine->current_handle = parent;
+  current_goroutine->current_handle() = parent;
   return parent;
 }
 template <class value_type>
 std::experimental::coroutine_handle<> Task<value_type>::Awaiter::await_suspend(
     std::experimental::coroutine_handle<> h) noexcept {
   self.promise().parent = h;
-  current_goroutine->current_handle = self;
+  current_goroutine->current_handle() = self;
   return self;
 }
 
 namespace detail {
 template <class value_type> struct Sudog {
   value_type *val;
-  Goroutine task;
+  GoroutineWrapper task;
   std::size_t wakeup_id;
   bool is_select;
   using Iter = typename std::list<Sudog>::iterator;
@@ -162,14 +153,16 @@ template <class Sudog> class SudogList {
   using Iter = typename Sudog::Iter;
   std::list<Sudog> queue;
   Iter hint_iter = queue.end();
+
 public:
   std::optional<Sudog> dequeueSudog() {
     for (; hint_iter != queue.end(); ++hint_iter) {
       if (hint_iter->is_select) {
         bool expected = false;
-        bool r = hint_iter->task.state &&
-                 hint_iter->task.state->on_select_detect_wait.compare_exchange_strong(
-                     expected, true); // TODO
+        bool r = hint_iter->task.p &&
+                 hint_iter->task.select()
+                     .on_select_detect_wait.compare_exchange_strong(
+                         expected, true); // TODO
         if (r) {
           // selectの場合、要素の解放はselectの解放処理に任せる
           auto x = std::move(*hint_iter);
@@ -211,10 +204,9 @@ void integral_constant_each(std::index_sequence<I...>, F f) {
 }
 } // namespace detail
 
-template <class T>
-concept ChannelStrategy = requires (T strategy) {
+template <class T> concept ChannelStrategy = requires(T strategy) {
   // - require: thread safe
-  strategy.push_goroutine(std::declval<Goroutine>());
+  strategy.push_goroutine(std::declval<std::shared_ptr<Goroutine>>());
 };
 
 template <ChannelStrategy Strategy, class value_type> class BasicChannel {
@@ -231,9 +223,9 @@ public:
     typename SendSudog::Iter it = {};
     bool await_ready() const noexcept {
       return false; // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
-    } 
+    }
     bool await_suspend(std::experimental::coroutine_handle<>) {
-      std::optional<Goroutine> next_goroutine;
+      std::optional<detail::GoroutineWrapper> next_goroutine;
       bool r = false;
       {
         std::scoped_lock lock{ch.mutex};
@@ -244,7 +236,7 @@ public:
               SendSudog{&val, std::move(task), 0, false});
       }
       if (next_goroutine)
-        ch.strategy.push_goroutine(std::move(*next_goroutine));
+        ch.strategy.push_goroutine(std::move(next_goroutine->to_goroutine()));
       return !r;
     }
 
@@ -260,13 +252,13 @@ public:
     void release_sudog() { ch.send_queue.eraseSudog(it); }
     void invoke_callback() { f(); }
 
-    std::tuple<bool, std::optional<Goroutine>> nonblock_send() {
+    std::tuple<bool, std::optional<detail::GoroutineWrapper>> nonblock_send() {
       if (ch.closed) {
         assert(false);
       } else if (auto opt = ch.recv_queue.dequeueSudog()) {
         auto &sdg = *opt;
         *sdg.val = std::move(val);
-        sdg.task.state->wakeup_id = sdg.wakeup_id;
+        sdg.task.select().wakeup_id = sdg.wakeup_id;
         return {true, std::move(sdg.task)};
       } else if (ch.value_queue.size() < ch.queue_limit) {
         ch.value_queue.push_back(std::move(val));
@@ -286,7 +278,7 @@ public:
       return false;
     } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
     bool await_suspend(std::experimental::coroutine_handle<>) {
-      std::optional<Goroutine> next_goroutine;
+      std::optional<detail::GoroutineWrapper> next_goroutine;
       bool r = false;
       {
         std::scoped_lock lock{ch.mutex};
@@ -297,7 +289,7 @@ public:
               RecvSudog{&val, std::move(task), 0, false});
       }
       if (next_goroutine)
-        ch.strategy.push_goroutine(std::move(*next_goroutine));
+        ch.strategy.push_goroutine(std::move(next_goroutine->to_goroutine()));
       return !r;
     }
     auto await_resume() noexcept { return std::move(val); }
@@ -311,14 +303,14 @@ public:
     void release_sudog() { ch.recv_queue.eraseSudog(it); }
     void invoke_callback() { f(val); }
 
-    std::tuple<bool, std::optional<Goroutine>> nonblock_recv() {
+    std::tuple<bool, std::optional<detail::GoroutineWrapper>> nonblock_recv() {
       if (ch.value_queue.size() > 0) {
         val = std::move(ch.value_queue.front());
         ch.value_queue.pop_front();
         if (auto opt = ch.send_queue.dequeueSudog()) {
           auto &sdg = *opt;
           ch.value_queue.push_back(std::move(*sdg.val));
-          sdg.task.state->wakeup_id = sdg.wakeup_id;
+          sdg.task.select().wakeup_id = sdg.wakeup_id;
           return {true, std::move(sdg.task)};
         }
         return {true, std::nullopt};
@@ -328,7 +320,7 @@ public:
       } else if (auto opt = ch.send_queue.dequeueSudog()) {
         auto &sdg = *opt;
         val = std::move(*sdg.val);
-        sdg.task.state->wakeup_id = sdg.wakeup_id;
+        sdg.task.select().wakeup_id = sdg.wakeup_id;
         return {true, std::move(sdg.task)};
       }
       return {false, std::nullopt};
@@ -354,14 +346,15 @@ public:
     while (auto opt = recv_queue.dequeueSudog()) {
       auto &sdg = *opt;
       *sdg.val = std::nullopt;
-      sdg.task.state->wakeup_id = sdg.wakeup_id;
-      strategy.push_goroutine(std::move(sdg.task));
+      sdg.task.select().wakeup_id = sdg.wakeup_id;
+      strategy.push_goroutine(sdg.task.to_goroutine());
     }
   }
   Strategy strategy;
   // mutex内で以下を行ってはならない。deadlockや処理に時間がかかる原因になりうるため
   // 1. strategy.push_goroutine()の呼び出し
-  // 2. goroutineの参照カウントを増やす行為(goroutineが破棄されることに~Task()が呼び出される)
+  // 2.
+  // goroutineの参照カウントを増やす行為(goroutineが破棄されることに~Task()が呼び出される)
   std::mutex mutex;
   std::size_t queue_limit;
   std::deque<value_type> value_queue;
@@ -383,7 +376,7 @@ struct [[nodiscard]] SelectAwaiter {
   } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
   bool await_suspend(std::experimental::coroutine_handle<>) noexcept {
     bool r = false;
-    std::optional<Goroutine> next_goroutine;
+    std::optional<detail::GoroutineWrapper> next_goroutine;
     { // lock block
       auto lock = std::apply(
           [](auto &... t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
@@ -400,7 +393,8 @@ struct [[nodiscard]] SelectAwaiter {
           });
       if (!r) {
         require_pass3 = true;
-        current_goroutine->on_select_detect_wait.store(false); // 初期化
+        current_goroutine->select().on_select_detect_wait.store(
+            false); // 初期化
         detail::integral_constant_each(
             std::make_index_sequence<N>{},
             [&](auto I) { std::get<I()>(sc_list).block_exec(I()); });
@@ -411,7 +405,7 @@ struct [[nodiscard]] SelectAwaiter {
           std::make_index_sequence<N>{}, [&](auto I) {
             if (I() == wakeup_id) {
               std::get<I()>(sc_list).ch.strategy.push_goroutine(
-                  std::move(*next_goroutine));
+                  next_goroutine->to_goroutine());
             }
           });
     }
@@ -422,7 +416,7 @@ struct [[nodiscard]] SelectAwaiter {
     if (require_pass3) {
       auto lock = std::apply(
           [](auto &... t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
-      wakeup_id = current_goroutine->wakeup_id;
+      wakeup_id = current_goroutine->select().wakeup_id;
       detail::integral_constant_each(
           std::make_index_sequence<N>{},
           [&](auto I) { std::get<I()>(sc_list).release_sudog(); });
@@ -439,39 +433,36 @@ template <class... T> SelectAwaiter<T...> select(T... select_case) {
   return {{select_case...}};
 }
 
-template <class Channel> class Sender {
+template <ChannelStrategy Strategy, class value_type> class Sender {
+  std::shared_ptr<BasicChannel<Strategy, value_type>> ch;
+
 public:
-  Sender(std::shared_ptr<Channel> const &ch) : ch(ch) {}
+  Sender(std::shared_ptr<BasicChannel<Strategy, value_type>> const &ch)
+      : ch(ch) {}
   ~Sender() { ch->close(); }
   template <class... T> auto send(T &&... args) {
     return ch->send(std::forward<T>(args)...);
   }
-
-private:
-  std::shared_ptr<Channel> ch;
 };
-template <class Channel> class Recver {
+template <ChannelStrategy Strategy, class value_type> class Recver {
+  std::shared_ptr<BasicChannel<Strategy, value_type>> ch;
+
 public:
-  Recver(std::shared_ptr<Channel> const &ch) : ch(ch) {}
+  Recver(std::shared_ptr<BasicChannel<Strategy, value_type>> const &ch)
+      : ch(ch) {}
   template <class... T> auto recv(T &&... args) {
     return ch->recv(std::forward<T>(args)...);
   }
-
-private:
-  std::shared_ptr<Channel> ch;
-};
-
-template <ChannelStrategy Strategy, class value_type> struct SenderRecver {
-  std::shared_ptr<Sender<BasicChannel<Strategy , value_type>>> sender;
-  std::shared_ptr<Recver<BasicChannel<Strategy, value_type>>> recver;
 };
 
 template <ChannelStrategy Strategy, class value_type>
-SenderRecver<Strategy, value_type> makeChannel(Strategy strategy,
-                                                std::size_t n) {
+std::tuple<std::shared_ptr<Sender<Strategy, value_type>>,
+           std::shared_ptr<Recver<Strategy, value_type>>>
+makeChannel(Strategy strategy, std::size_t n) {
   using Ch = BasicChannel<Strategy, value_type>;
   auto p = std::make_shared<Ch>(strategy, n);
-  return {std::make_shared<Sender<Ch>>(p), std::make_shared<Recver<Ch>>(p)};
+  return {std::make_shared<Sender<Strategy, value_type>>(p),
+          std::make_shared<Recver<Strategy, value_type>>(p)};
 }
 
 } // namespace cfn
