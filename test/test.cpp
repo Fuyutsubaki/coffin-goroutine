@@ -234,15 +234,15 @@ IUTEST(BasicChannel, Select){
         }());
     gsc.spown_task(
         [&]() -> cfn::Task<> {
-            bool done = false;
-            while (!done){
-                co_await cfn::select(
-                    done_ch.recv([&](auto) {
-                        done = true;
-                    }),
-                    ch.recv([&](auto x) {
-                        tmp.push_back(*x);
-                    }));
+            while (1){
+                auto [done, ret] = co_await cfn::select(
+                    done_ch.recv(),
+                    ch.recv());
+                if(done){
+                    break;
+                }else if(ret){
+                    tmp.push_back(**ret);
+                }
             }
             gsc.stop();
         }());

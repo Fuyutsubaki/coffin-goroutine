@@ -158,11 +158,8 @@ public:
   std::optional<Sudog> dequeueSudog() {
     for (; hint_iter != queue.end(); ++hint_iter) {
       if (hint_iter->is_select) {
-        bool expected = false;
         bool r = hint_iter->task.p &&
-                 hint_iter->task.select()
-                     .on_select_detect_wait.compare_exchange_strong(
-                         expected, true); // TODO
+                 hint_iter->task.select().on_select_detect_wait.exchange(false);
         if (r) {
           // selectの場合、要素の解放はselectの解放処理に任せる
           auto x = std::move(*hint_iter);
@@ -202,6 +199,10 @@ void integral_constant_each(std::index_sequence<I...>, F f) {
   int v[] = {(f(std::integral_constant<std::size_t, I>{}), 0)...};
   (void)v;
 }
+template <std::size_t... I, class F>
+auto integral_constant_map(std::index_sequence<I...>, F f) {
+  return std::make_tuple(f(std::integral_constant<std::size_t, I>{})...);
+}
 } // namespace detail
 
 template <class T> concept ChannelStrategy = requires(T strategy) {
@@ -219,7 +220,6 @@ public:
     // channelの所有権を持たない。これはSendAwaiterをもつgoroutineが持っているハズであるためである
     BasicChannel &ch;
     value_type val; // おおよそ任意のタイミングでmoveされる
-    std::function<void()> f;
     typename SendSudog::Iter it = {};
     bool await_ready() const noexcept {
       return false; // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
@@ -250,7 +250,7 @@ public:
           SendSudog{&val, std::move(task), wakeup_id, true});
     }
     void release_sudog() { ch.send_queue.eraseSudog(it); }
-    void invoke_callback() { f(); }
+    bool select_result(bool r) { return r; }
 
     std::tuple<bool, std::optional<detail::GoroutineWrapper>> nonblock_send() {
       if (ch.closed) {
@@ -301,7 +301,12 @@ public:
           RecvSudog{&val, std::move(task), wakeup_id, true});
     }
     void release_sudog() { ch.recv_queue.eraseSudog(it); }
-    void invoke_callback() { f(val); }
+
+    std::optional<std::optional<value_type>> select_result(bool r) {
+      if (r)
+        return std::move(val);
+      return std::nullopt;
+    }
 
     std::tuple<bool, std::optional<detail::GoroutineWrapper>> nonblock_recv() {
       if (ch.value_queue.size() > 0) {
@@ -327,15 +332,11 @@ public:
     }
   };
 
-  template <class T>
-  SendAwaiter send(T &&val, std::function<void()> f = [](auto...) {}) {
-    return SendAwaiter{*this, std::forward<T>(val), f};
+  template <class T> SendAwaiter send(T &&val) {
+    return SendAwaiter{*this, std::forward<T>(val)};
   }
 
-  RecvAwaiter recv(std::function<void(std::optional<value_type>)> f =
-                       [](auto...) {}) {
-    return RecvAwaiter{*this, std::nullopt, f};
-  }
+  RecvAwaiter recv() { return RecvAwaiter{*this, std::nullopt}; }
 
   void close() {
     std::scoped_lock lock{mutex};
@@ -372,8 +373,8 @@ struct [[nodiscard]] SelectAwaiter {
   bool require_pass3 = false;
   std::size_t wakeup_id = 0;
   bool await_ready() const noexcept {
-    return false;
-  } // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
+    return false; // 何回もlock取得するわけにいかないので常にawait_suspendで処理する
+  }
   bool await_suspend(std::experimental::coroutine_handle<>) noexcept {
     bool r = false;
     std::optional<detail::GoroutineWrapper> next_goroutine;
@@ -393,8 +394,7 @@ struct [[nodiscard]] SelectAwaiter {
           });
       if (!r) {
         require_pass3 = true;
-        current_goroutine->select().on_select_detect_wait.store(
-            false); // 初期化
+        current_goroutine->select().on_select_detect_wait.store(true);
         detail::integral_constant_each(
             std::make_index_sequence<N>{},
             [&](auto I) { std::get<I()>(sc_list).block_exec(I()); });
@@ -411,7 +411,7 @@ struct [[nodiscard]] SelectAwaiter {
     }
     return !r;
   }
-  void await_resume() noexcept {
+  auto await_resume() noexcept {
     // pass 3
     if (require_pass3) {
       auto lock = std::apply(
@@ -421,11 +421,10 @@ struct [[nodiscard]] SelectAwaiter {
           std::make_index_sequence<N>{},
           [&](auto I) { std::get<I()>(sc_list).release_sudog(); });
     }
-    detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
-      if (I() == wakeup_id) {
-        std::get<I()>(sc_list).invoke_callback();
-      }
-    });
+    return detail::integral_constant_map(
+        std::make_index_sequence<N>{}, [&](auto I) {
+          return std::get<I()>(sc_list).select_result(I() == wakeup_id);
+        });
   }
 };
 
@@ -440,8 +439,8 @@ public:
   Sender(std::shared_ptr<BasicChannel<Strategy, value_type>> const &ch)
       : ch(ch) {}
   ~Sender() { ch->close(); }
-  template <class... T> auto send(T &&... args) {
-    return ch->send(std::forward<T>(args)...);
+  template <class T> auto send(T &&val) {
+    return ch->send(std::forward<T>(val));
   }
 };
 template <ChannelStrategy Strategy, class value_type> class Recver {
@@ -450,9 +449,7 @@ template <ChannelStrategy Strategy, class value_type> class Recver {
 public:
   Recver(std::shared_ptr<BasicChannel<Strategy, value_type>> const &ch)
       : ch(ch) {}
-  template <class... T> auto recv(T &&... args) {
-    return ch->recv(std::forward<T>(args)...);
-  }
+  auto recv() { return ch->recv(); }
 };
 
 template <ChannelStrategy Strategy, class value_type>
