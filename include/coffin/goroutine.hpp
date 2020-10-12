@@ -19,7 +19,8 @@ struct ExceptionHandler {
 };
 } // namespace detail
 
-template <class value_type = void> struct Task {
+template <class value_type = void> class Task {
+public:
   struct promise_type;
   using handle_type = std::experimental::coroutine_handle<promise_type>;
   struct FinalSuspend {
