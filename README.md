@@ -1,33 +1,26 @@
 # coffin/goroutine
 
-"coffin/goroutine" is a single header library for supporting goroutine-like concurrency in C++
+"coffin/goroutine" は goroutine/channelのような非同期実行をサポートする シングルヘッダライブラリである
 
 ```C++:sample.cpp
-template<class value_type>
-using MyChannel = cfn::BasicChannel<MyScheduler, value_type>;
 
-cfn::Task<> recv(MyChannel<int>&ch, MyChannel<int>&done_ch){
-    co_await cfn::select(
-        done_ch.recv([&](auto){
-            done = true;
-        }),
-        ch.recv([&](auto x){
-            tmp.push_back(*x);
-        })
-    );
+cfn::Task<> recv(std::shared_ptr<MyRecver<int>> const &ch,std::shared_ptr<MyRecver<int>> const &done_ch){
+    for(;;){
+        auto [done, ret] = 
+            co_await cfn::select(done_ch->recv(), ch->recv());
+        if(done){
+            break;
+        }else if(ret){
+            std::cout<<**ret<<std::endl;
+        }
+    }
 }
 ```
 
-
-
 ## 準備
-coffin/goroutineはSchedulerを含んでいない。これはアプリケーションにすでにSchedulerが存在する場合、それと共存するためである
 
-アプリケーション開発者は以下を用意する必要がある
-
-- Scheduler (無ければ)
-- Scheduler の Adapter
-- あなたのアプリケーションに必要な便利関数(欲しければ)
+1. coffin/goroutineはSchedulerを含んでいない。これはアプリケーションにすでにSchedulerが存在する場合、それと共存するためである
+2. 上記のSchedulerとChannnelをつなぐ、 `ChannelStrategy` を定義する必要がある
 
 ```C++:example
 // Scheduler example
@@ -48,18 +41,14 @@ struct MyScheduler {
 
         io_service_.reset();
     }
-
-    void stop(){
-        work_.reset();
-    }
 };
 
 static inline MyScheduler global_scheduler;
 
-// Adapter example
-struct Adapter{
+// Strategy example
+struct MyStrategy{
     void push_goroutine(cfn::Goroutine && g){
-        global_scheduler.post([g=std::move(g.move_as_SharedGoroutine())]()mutable{g.execute();}); 
+        global_scheduler.post([=]()mutable{g.execute();}); 
     }
 };
 ```
@@ -68,12 +57,22 @@ struct Adapter{
 
 ### Task<T>
 
+```C++
+template <class value_type = void> 
+class Task {
+public:
+  auto operator co_await();
+  using promise_type = <unspecified>;
+};
+
+```
+
 `Task` は コルーチンによる非同期実行をサポートするクラスである
 
 1. `co_await チャンネル` のように記述することで非同期処理を行うことができる
 2. `co_return` を用いて 型`T`の値をコルーチンから返すことができる
 3. `Task` の `co_await`に`Task<T>`を渡すことで、`co_return` の結果を受け取ることができる
-
+4. `Goroutine`に渡すことで実行できるようになる
 
 ```C++
 // 1
@@ -98,14 +97,49 @@ cfn::Task<> task1(){
 
 ```
 
-### auto makeChannel<ChannelStrategy,T>(ChannelStrategy, queue_size)
+### makeChannel()
+
+
+```
+template <class T> concept ChannelStrategy = requires(T strategy) {
+  // - require: thread safe
+  strategy.push_goroutine(std::declval<std::shared_ptr<Goroutine>>());
+};
+
+template <ChannelStrategy Strategy, class value_type> 
+class BasicChannel{
+public:
+    template <class T> SendAwaiter send(T && val);
+    RecvAwaiter send();
+    void close();
+};
+
+template <ChannelStrategy Strategy, class value_type> 
+class Sender {
+public:
+  template <class T> auto send(T &&val);
+};
+template <ChannelStrategy Strategy, class value_type> 
+class Recver {
+public:
+  auto recv();
+};
+
+template <ChannelStrategy Strategy, class value_type>
+std::tuple<std::shared_ptr<Sender<Strategy, value_type>>,
+           std::shared_ptr<Recver<Strategy, value_type>>>
+makeChannel(Strategy strategy, std::size_t n);
+```
+
 チャンネルは非同期通信をサポートする
 
-- makeChannelは queue size nのチャンネルを生成し、それへの参照をもつ SenderとRecverを返します
-- Senderはデストラクト時にChannelをcloseします
+- makeChannelは queue size nのチャンネルを生成し、それへの参照をもつ SenderとRecverを返す
+- Senderはデストラクト時にChannelをcloseする
+- Channelを使用するにはChannelStrategy を定義する必要があります。詳しくは 準備 の項を参照
+
 
 ```C++
-auto [sender, recver] = cfn::makeChannel<MyScheduler, int>(gsc,0);
+auto [sender, recver] = cfn::makeChannel<MyStrategy, int>(my_strategy, 0);
 auto t1 = 
     [](auto sender) -> cfn::Task<> {
         for(int i=0;i<10;++i){
@@ -124,13 +158,23 @@ auto t2 =
 ```
 
 
-### select/try_select
+### select()
 
+selectは複数のchannel.send()/recv()を受け取り、いずれかのchannelで値取得可能になり次第、そのchannelから値を取得する
+
+```
+auto [done, ret] = 
+    co_await cfn::select(done_ch->recv(), ch->recv());
+if(done){
+    break;
+}else if(ret){
+    std::cout<<**ret<<std::endl;
+}
+```
 
 ### Goroutine
 
-`Goroutine` は `Task` を実行するためのclassである。
-Schedulerは Goroutineを受け取り、実行する必要がある
+`Goroutine` は `Task<>` を実行するためのclassである
 
 ```C++
 struct Goroutine {
@@ -138,3 +182,18 @@ struct Goroutine {
   void execute();
 };
 ```
+
+### concept ChannelStrategy 
+
+ChannelStrategy 
+
+```
+template <class T> concept ChannelStrategy = requires(T strategy) {
+  strategy.push_goroutine(std::declval<std::shared_ptr<Goroutine>>());
+};
+```
+
+
+- `void push_goroutine(cfn::Goroutine && g)`  を実装する必要がある
+    - この関数は
+    - Channnelを複数threadから使用する場合は、`push_goroutine` はthread_safeで無ければならない
