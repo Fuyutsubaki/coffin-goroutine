@@ -47,7 +47,7 @@ static inline MyScheduler global_scheduler;
 
 // Strategy example
 struct MyStrategy{
-    void push_goroutine(cfn::Goroutine && g){
+    void post_goroutine(cfn::Goroutine && g){
         global_scheduler.post([=]()mutable{g.execute();}); 
     }
 };
@@ -103,7 +103,7 @@ cfn::Task<> task1(){
 ```
 template <class T> concept ChannelStrategy = requires(T strategy) {
   // - require: thread safe
-  strategy.push_goroutine(std::declval<std::shared_ptr<Goroutine>>());
+  strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
 };
 
 template <ChannelStrategy Strategy, class value_type> 
@@ -135,7 +135,7 @@ makeChannel(Strategy strategy, std::size_t n);
 
 - makeChannelは queue size nのチャンネルを生成し、それへの参照をもつ SenderとRecverを返す
 - Senderはデストラクト時にChannelをcloseする
-- Channelを使用するにはChannelStrategy を定義する必要があります。詳しくは 準備 の項を参照
+- Channelを使用するにはChannelStrategy を定義する必要がある。詳しくは 準備 の項を参照
 
 
 ```C++
@@ -160,7 +160,7 @@ auto t2 =
 
 ### select()
 
-selectは複数のchannel.send()/recv()を受け取り、いずれかのchannelで値取得可能になり次第、そのchannelから値を取得する
+selectは複数のchannel.send()/recv()を受け取る。いずれかのchannelで値取得可能になり次第、そのchannelから値を取得する
 
 ```
 auto [done, ret] = 
@@ -183,17 +183,14 @@ struct Goroutine {
 };
 ```
 
-### concept ChannelStrategy 
-
-ChannelStrategy 
+### concept ChannelStrategy  
 
 ```
 template <class T> concept ChannelStrategy = requires(T strategy) {
-  strategy.push_goroutine(std::declval<std::shared_ptr<Goroutine>>());
+  strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
 };
 ```
 
-
-- `void push_goroutine(cfn::Goroutine && g)`  を実装する必要がある
-    - この関数は
-    - Channnelを複数threadから使用する場合は、`push_goroutine` はthread_safeで無ければならない
+- `void post_goroutine(cfn::Goroutine &&)`  を実装する必要がある
+    - この関数は Channelで blockされた GoroutineをSchedulerにpostするために使う
+    - 複数threadでChannnelを使用する場合は、`post_goroutine` はthread safeで無ければならない
