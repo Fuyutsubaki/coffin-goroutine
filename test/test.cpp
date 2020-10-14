@@ -6,12 +6,20 @@
 #include<array>
 #include<iostream>
 
+struct SuspendAlways{
+    bool await_ready(){return false;}
+    void await_suspend(std::experimental::coroutine_handle<> h){
+        cfn::detail::ready_park(h);
+    }
+    void await_resume(){}
+};
+
 IUTEST(Goroutine, execute){
     int n;
     auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
         for(int i=0;i<3;++i){
             n = i;
-            co_await std::experimental::suspend_always{};
+            co_await SuspendAlways{};
         }
     }());
     for(int i=0;i<3;++i){
@@ -23,7 +31,7 @@ IUTEST(Goroutine, execute){
 cfn::Task<> gen_recursive_task(int &n, int x, int len){
     if(len == 1){
         n = x;
-        co_await std::experimental::suspend_always{};
+        co_await SuspendAlways{};
     }else{
         co_await gen_recursive_task(n, x, len / 2);
         co_await gen_recursive_task(n, x + len / 2, len - len / 2);
@@ -44,10 +52,10 @@ IUTEST(Goroutine, subtask_exception){
         auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
             co_await []() -> cfn::Task<> {
                 throw 42;
-                co_await std::experimental::suspend_always{};
+                co_return;
             }();
 
-            co_await std::experimental::suspend_always{};
+            co_await SuspendAlways{};
         }());
 
         IUTEST_ASSERT_THROW_VALUE_EQ(g->execute(), int, 42);
@@ -57,10 +65,9 @@ IUTEST(Goroutine, subtask_exception){
         auto g = std::make_shared<cfn::Goroutine>([&]() -> cfn::Task<> {
             try
             {
-                co_await []() -> cfn::Task<int> {
+                co_await []() -> cfn::Task<> {
                     throw 42;
-                    co_await std::experimental::suspend_always{};
-                    co_return 5;
+                    co_return;
                 }();
             }
             catch (int x)
@@ -93,7 +100,7 @@ struct MyScheduler{
         std::scoped_lock lock{mutex};
         queue.push_back(std::make_shared<cfn::Goroutine>(std::move(task)));
     }
-    void push_goroutine(std::shared_ptr<cfn::Goroutine> && g){
+    void post_goroutine(std::shared_ptr<cfn::Goroutine> && g){
         std::scoped_lock lock{mutex};
         queue.push_back(g);
     }
@@ -318,7 +325,7 @@ struct BoostThreadpoolScheduler {
 static BoostThreadpoolScheduler gbts;
 struct BoostThreadpoolSchedulerWrapper{
     BoostThreadpoolScheduler & ref_;
-    void push_goroutine(std::shared_ptr<cfn::Goroutine> && g){
+    void post_goroutine(std::shared_ptr<cfn::Goroutine> && g){
         ref_.io_service_.post([=]()mutable{g->execute(); });
     }
 };
