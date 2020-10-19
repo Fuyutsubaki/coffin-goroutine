@@ -3,7 +3,6 @@
 #include <cassert>
 #include <deque>
 #include <experimental/coroutine>
-#include <functional>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -13,7 +12,7 @@ namespace cfn {
 
 class Goroutine;
 namespace detail {
-class GoroutineWrapper;
+struct GoroutineWrapper;
 struct ExceptionHandler {
   std::exception_ptr e;
 };
@@ -266,7 +265,6 @@ public:
   struct [[nodiscard]] RecvAwaiter {
     BasicChannel &ch;
     std::optional<value_type> val;
-    std::function<void(std::optional<value_type>)> f;
     typename RecvSudog::Iter it = {};
     bool await_ready() const noexcept {
       return false;
