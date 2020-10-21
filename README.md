@@ -187,7 +187,7 @@ cfn::Task<> task1(){
 ### makeChannel()
 
 
-```
+```C++
 template <class T> concept ChannelStrategy = requires(T strategy) {
   // - require: thread safe
   strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
@@ -275,7 +275,7 @@ struct Goroutine {
 
 ### concept ChannelStrategy  
 
-```
+```C++
 template <class T> concept ChannelStrategy = requires(T strategy) {
   strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
 };
