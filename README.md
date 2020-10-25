@@ -13,7 +13,7 @@ https://wandbox.org/permlink/G8jTPwCnlPTOYXEU
 もしあなたのアプリケーションがSchedulerを持っていない場合、Schedulerを用意する必要がある
 - coffin/goroutineはSchedulerを含んでいない。これはアプリケーションにすでにSchedulerが存在する場合、それと共存するためである
 
-```C++:example
+```C++
 // Scheduler
 struct MyScheduler {
     boost::asio::io_service io_service_;
@@ -47,7 +47,7 @@ static inline MyScheduler global_scheduler;
 
 するべきことは、渡された goroutineを一度だけ実行する処理をScheduler に postする関数`post_goroutine` を定義することである
 
-```C++:example
+```C++
 struct MyStrategy{
     void post_goroutine(std::shared_ptr<cfn::Goroutine> && g){
         global_scheduler.post([=]()mutable{g->execute();}); 
@@ -59,7 +59,7 @@ struct MyStrategy{
 - TaskとGoroutineを用いることで、Schedulerにtaskをpostすることができる
 - GoroutineはTaskから変換することができる
 
-```C++:example1
+```C++
 void spown_task(cfn::Task<> && task){
     global_scheduler.post([g = std::make_shared<cfn::Goroutine>(std::move(task))]{
         g->execute();
@@ -84,7 +84,7 @@ void example1(){
 
 - TaskとChannelを用いることで非同期処理を行うことができる
 
-```C++:example2
+```C++
 cfn::Task<> fibonacci_n(int n, std::shared_ptr<cfn::Sender<MyStrategy,int>> ch){
     int x=0;
     int y=1;
@@ -187,7 +187,7 @@ cfn::Task<> task1(){
 ### makeChannel()
 
 
-```
+```C++
 template <class T> concept ChannelStrategy = requires(T strategy) {
   // - require: thread safe
   strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
@@ -275,7 +275,7 @@ struct Goroutine {
 
 ### concept ChannelStrategy  
 
-```
+```C++
 template <class T> concept ChannelStrategy = requires(T strategy) {
   strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
 };
