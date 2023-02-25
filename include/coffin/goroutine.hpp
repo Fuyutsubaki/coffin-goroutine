@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <variant>
+#include <memory>
 
 namespace cfn {
 
@@ -15,6 +16,30 @@ namespace detail {
 struct GoroutineWrapper;
 struct ExceptionHandler {
   std::exception_ptr e;
+};
+
+template <class value_type> struct promise_type1 {
+  template <class U> void return_value(U &&v) { val = std::forward<U>(v); }
+  void unhandled_exception() {
+    val = detail::ExceptionHandler{std::current_exception()};
+  }
+  std::variant<detail::ExceptionHandler, value_type> val;
+  auto get_or_rethrow() {
+    if (auto p = std::get_if<detail::ExceptionHandler>(&val)) {
+      std::rethrow_exception(p->e);
+    }
+    return std::move(std::get<value_type>(val));
+  }
+};
+template <> struct promise_type1<void> {
+  void return_void() {}
+  void unhandled_exception() { ep = std::current_exception(); }
+  std::exception_ptr ep;
+  auto get_or_rethrow() {
+    if (ep) {
+      std::rethrow_exception(ep);
+    }
+  }
 };
 } // namespace detail
 
@@ -41,30 +66,8 @@ public:
     value_type await_resume() { return self.promise().get_or_rethrow(); }
   };
 
-  template <class T> struct promise_type1 {
-    template <class U> void return_value(U &&v) { val = std::forward<U>(v); }
-    void unhandled_exception() {
-      val = detail::ExceptionHandler{std::current_exception()};
-    }
-    std::variant<detail::ExceptionHandler, value_type> val;
-    auto get_or_rethrow() {
-      if (auto p = std::get_if<detail::ExceptionHandler>(&val)) {
-        std::rethrow_exception(p->e);
-      }
-      return std::move(std::get<value_type>(val));
-    }
-  };
-  template <> struct promise_type1<void> {
-    void return_void() {}
-    void unhandled_exception() { ep = std::current_exception(); }
-    std::exception_ptr ep;
-    auto get_or_rethrow() {
-      if (ep) {
-        std::rethrow_exception(ep);
-      }
-    }
-  };
-  struct promise_type : promise_type1<value_type> {
+
+  struct promise_type : detail::promise_type1<value_type> {
     promise_type() {}
     auto get_return_object() { return Task{handle_type::from_promise(*this)}; }
     std::suspend_always initial_suspend() { return {}; }
@@ -158,7 +161,7 @@ public:
           // selectの場合、要素の解放はselectの解放処理に任せる
           auto x = std::move(*hint_iter);
           hint_iter++;
-          return std::move(x);
+          return x;
         }
       } else {
         auto it = hint_iter;

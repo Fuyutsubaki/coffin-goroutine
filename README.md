@@ -260,6 +260,23 @@ if(done){
 }
 ```
 
+### try_select()
+
+try_selectはselectのnon block版である。  
+selectでは実行可能な処理がない場合co_awaitで待機するが、try_selectでは待機せず即座に値を返す
+
+```C++
+auto [done, ret] = 
+    cfn::try_select(done_ch->recv(), ch->recv());
+if(done){
+    break;
+}else if(ret){
+    std::cout<<**ret<<std::endl;
+}else{
+    std::cout<<"none"<<std::endl;
+}
+```
+
 ### Goroutine
 
 `Goroutine` は 以下の役割を持つ
