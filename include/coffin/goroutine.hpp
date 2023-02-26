@@ -1,13 +1,14 @@
 #pragma once
+
 #include <atomic>
 #include <cassert>
-#include <deque>
 #include <coroutine>
+#include <deque>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <variant>
-#include <memory>
 
 namespace cfn {
 
@@ -49,8 +50,7 @@ public:
   using handle_type = std::coroutine_handle<promise_type>;
   struct FinalSuspend {
     bool await_ready() const noexcept { return false; }
-    std::coroutine_handle<>
-    await_suspend(handle_type self) noexcept {
+    std::coroutine_handle<> await_suspend(handle_type self) noexcept {
       return self.promise().parent;
     }
     void await_resume() noexcept {}
@@ -58,22 +58,19 @@ public:
   struct Awaiter {
     handle_type self;
     bool await_ready() const noexcept { return false; }
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<> h) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
       self.promise().parent = h;
       return self;
     }
     value_type await_resume() { return self.promise().get_or_rethrow(); }
   };
 
-
   struct promise_type : detail::promise_type1<value_type> {
     promise_type() {}
     auto get_return_object() { return Task{handle_type::from_promise(*this)}; }
     std::suspend_always initial_suspend() { return {}; }
     FinalSuspend final_suspend() noexcept { return {}; }
-    std::coroutine_handle<> parent =
-        std::noop_coroutine();
+    std::coroutine_handle<> parent = std::noop_coroutine();
   };
   auto operator co_await() { return Awaiter{coro_}; }
 
@@ -112,9 +109,7 @@ namespace detail {
 struct GoroutineWrapper {
   std::shared_ptr<Goroutine> p;
   Goroutine::Seldat &select() { return p->seldat; }
-  std::coroutine_handle<> &current_handle() {
-    return p->current_handle;
-  }
+  std::coroutine_handle<> &current_handle() { return p->current_handle; }
   std::shared_ptr<Goroutine> to_goroutine() { return p; };
 };
 thread_local inline GoroutineWrapper *current_goroutine = nullptr;
@@ -202,7 +197,8 @@ auto integral_constant_map(std::index_sequence<I...>, F f) {
 }
 } // namespace detail
 
-template <class T> concept ChannelStrategy = requires(T strategy) {
+template <class T>
+concept ChannelStrategy = requires(T strategy) {
   // - require: thread safe
   strategy.post_goroutine(std::declval<std::shared_ptr<Goroutine>>());
 };
@@ -241,8 +237,7 @@ public:
 
     // select用
     auto try_nonblock_exec() { return nonblock_send(); }
-    void block_exec(std::size_t wakeup_id,
-                    std::coroutine_handle<> h) {
+    void block_exec(std::size_t wakeup_id, std::coroutine_handle<> h) {
       it = ch.send_queue.enqueueSudog(
           SendSudog{&val, detail::ready_park(h), wakeup_id, true});
     }
@@ -290,8 +285,7 @@ public:
     auto await_resume() noexcept { return std::move(val); }
 
     auto try_nonblock_exec() { return nonblock_recv(); }
-    void block_exec(std::size_t wakeup_id,
-                    std::coroutine_handle<> h) {
+    void block_exec(std::size_t wakeup_id, std::coroutine_handle<> h) {
       it = ch.recv_queue.enqueueSudog(
           RecvSudog{&val, detail::ready_park(h), wakeup_id, true});
     }
@@ -360,8 +354,7 @@ public:
   bool closed = false;
 };
 
-template <class... T>
-struct [[nodiscard]] SelectAwaiter {
+template <class... T> struct [[nodiscard]] SelectAwaiter {
   std::tuple<T...> sc_list;
   static constexpr std::size_t N = sizeof...(T);
 
@@ -375,7 +368,7 @@ struct [[nodiscard]] SelectAwaiter {
     std::optional<detail::GoroutineWrapper> next_goroutine;
     { // lock block
       auto lock = std::apply(
-          [](auto &... t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
+          [](auto &...t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
 
       detail::integral_constant_each(
           std::make_index_sequence<N>{}, [&](auto I) {
@@ -410,7 +403,7 @@ struct [[nodiscard]] SelectAwaiter {
     // pass 3
     if (require_pass3) {
       auto lock = std::apply(
-          [](auto &... t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
+          [](auto &...t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
       wakeup_id = detail::current_goroutine->select().wakeup_id;
       detail::integral_constant_each(
           std::make_index_sequence<N>{},
@@ -423,45 +416,41 @@ struct [[nodiscard]] SelectAwaiter {
   }
 };
 
-template <class... T>
-auto try_select(T... select_case){
-    std::tuple<T...> sc_list = { select_case... };
-    static constexpr std::size_t N = sizeof...(T);
-    std::size_t wakeup_id = 0;
-    bool r = false;
-    std::optional<detail::GoroutineWrapper> next_goroutine;
+template <class... T> auto try_select(T... select_case) {
+  std::tuple<T...> sc_list = {select_case...};
+  static constexpr std::size_t N = sizeof...(T);
+  std::size_t wakeup_id = 0;
+  bool r = false;
+  std::optional<detail::GoroutineWrapper> next_goroutine;
 
-    { // lock block
-        auto lock = std::apply(
-            [](auto &... t) { return std::scoped_lock{ t.ch.mutex... }; }, sc_list);
+  { // lock block
+    auto lock = std::apply(
+        [](auto &...t) { return std::scoped_lock{t.ch.mutex...}; }, sc_list);
 
-        detail::integral_constant_each(
-            std::make_index_sequence<N>{}, [&](auto I) {
-                if (!r) {
-                    std::tie(r, next_goroutine) =
-                        std::get<I()>(sc_list).try_nonblock_exec();
-                    if (r) {
-                        wakeup_id = I();
-                    }
-                }
-            });
-    } // lock block
-    if (next_goroutine) {
-        detail::integral_constant_each(
-            std::make_index_sequence<N>{}, [&](auto I) {
-                if (I() == wakeup_id) {
-                    std::get<I()>(sc_list).ch.strategy.post_goroutine(
-                        next_goroutine->to_goroutine());
-                }
-            });
-    }
+    detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
+      if (!r) {
+        std::tie(r, next_goroutine) =
+            std::get<I()>(sc_list).try_nonblock_exec();
+        if (r) {
+          wakeup_id = I();
+        }
+      }
+    });
+  } // lock block
+  if (next_goroutine) {
+    detail::integral_constant_each(std::make_index_sequence<N>{}, [&](auto I) {
+      if (I() == wakeup_id) {
+        std::get<I()>(sc_list).ch.strategy.post_goroutine(
+            next_goroutine->to_goroutine());
+      }
+    });
+  }
 
-	return detail::integral_constant_map(
-		std::make_index_sequence<N>{}, [&](auto I) {
-			return std::get<I()>(sc_list).select_result(r && I() == wakeup_id);
-		});
+  return detail::integral_constant_map(
+      std::make_index_sequence<N>{}, [&](auto I) {
+        return std::get<I()>(sc_list).select_result(r && I() == wakeup_id);
+      });
 }
-
 
 template <class... T> SelectAwaiter<T...> select(T... select_case) {
   return {{select_case...}};
