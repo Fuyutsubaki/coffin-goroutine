@@ -5,7 +5,7 @@
 ## チュートリアル
 
 チュートリアルで説明するすべてのコードは、下のリンクからブラウザで試すことができる
-https://wandbox.org/permlink/G8jTPwCnlPTOYXEU
+https://wandbox.org/permlink/3LBaAqOACoKCTmB3
 
 ### 準備
 
