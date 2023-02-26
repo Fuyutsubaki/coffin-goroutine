@@ -25,6 +25,6 @@ jobs:
       # Runs a set of commands using the runners shell
       - name: Run a multi-line script
         run: |
-          sudo apt-get update && sudo apt-get install clang-10 libc++abi-10-dev libc++-10-dev 
+          sudo apt-get update && sudo apt-get install clang-14
           sudo apt-get install libboost-dev   libboost-system-dev # for test
           make -C test test
